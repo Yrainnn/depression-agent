@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+prometheus-client
+gradio
+python-dotenv
+pydantic
+requests
+jinja2
+weasyprint
+redis
+websockets>=12.0
+httpx[http2]>=0.27
+tenacity>=8.2
