@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -11,7 +12,10 @@ class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
 
     environment: str = Field("development", alias="ENVIRONMENT")
-    asr_provider: str = Field("tingwu", alias="ASR_PROVIDER")
+    asr_provider: str = Field(
+        default_factory=lambda: os.getenv("ASR_PROVIDER", "tingwu"),
+        alias="ASR_PROVIDER",
+    )
     redis_url: str = Field(..., alias="REDIS_URL")
     redis_prefix: str = Field("da", alias="REDIS_PREFIX")
     redis_password: Optional[str] = Field(None, alias="REDIS_PASSWORD")
@@ -23,22 +27,42 @@ class Settings(BaseSettings):
     alibaba_cloud_access_key_secret: Optional[str] = Field(
         None, alias="ALIBABA_CLOUD_ACCESS_KEY_SECRET"
     )
-    dashscope_api_key: Optional[str] = Field(None, alias="DASHSCOPE_API_KEY")
+    dashscope_api_key: Optional[str] = Field(
+        default_factory=lambda: os.getenv("DASHSCOPE_API_KEY"),
+        alias="DASHSCOPE_API_KEY",
+    )
     tingwu_appkey: Optional[str] = Field(None, alias="TINGWU_APPKEY")
-    tingwu_app_id: Optional[str] = Field(None, alias="TINGWU_APP_ID")
+    tingwu_app_id: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TINGWU_APP_ID"),
+        alias="TINGWU_APP_ID",
+    )
     tingwu_ak_id: Optional[str] = Field(None, alias="TINGWU_AK_ID")
     tingwu_ak_secret: Optional[str] = Field(None, alias="TINGWU_AK_SECRET")
     tingwu_region: str = Field("cn-shanghai", alias="TINGWU_REGION")
     tingwu_base: str = Field("https://tingwu.aliyuncs.com", alias="TINGWU_BASE")
+    tingwu_model: str = Field(
+        default_factory=lambda: os.getenv("TINGWU_MODEL", "paraformer-realtime-v2"),
+        alias="TINGWU_MODEL",
+    )
     tingwu_base_address: Optional[str] = Field(
-        None, alias="TINGWU_BASE_ADDRESS"
+        default_factory=lambda: os.getenv("TINGWU_BASE_ADDRESS"),
+        alias="TINGWU_BASE_ADDRESS",
     )
     tingwu_ws_base: str = Field(
         "wss://tingwu.aliyuncs.com/ws/v1", alias="TINGWU_WS_BASE"
     )
-    tingwu_sr: int = Field(16000, alias="TINGWU_SR")
-    tingwu_format: str = Field("pcm", alias="TINGWU_FORMAT")
-    tingwu_lang: str = Field("cn", alias="TINGWU_LANG")
+    tingwu_sr: int = Field(
+        default_factory=lambda: int(os.getenv("TINGWU_SR", "16000")),
+        alias="TINGWU_SR",
+    )
+    tingwu_format: str = Field(
+        default_factory=lambda: os.getenv("TINGWU_FORMAT", "pcm"),
+        alias="TINGWU_FORMAT",
+    )
+    tingwu_lang: str = Field(
+        default_factory=lambda: os.getenv("TINGWU_LANG", "cn"),
+        alias="TINGWU_LANG",
+    )
 
     # ------------------------------------------------------------------
     # Compatibility accessors (new uppercase field names exposed for callers)
@@ -53,6 +77,10 @@ class Settings(BaseSettings):
     @property
     def TINGWU_BASE_ADDRESS(self) -> Optional[str]:
         return self.tingwu_base_address
+
+    @property
+    def TINGWU_MODEL(self) -> str:
+        return self.tingwu_model
 
     @property
     def TINGWU_FORMAT(self) -> str:

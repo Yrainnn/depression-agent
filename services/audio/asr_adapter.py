@@ -46,9 +46,15 @@ class SDKTingWuASR:
     """DashScope TingWu implementation used for realtime transcription."""
 
     def __init__(self, app_settings):
+        self.model = app_settings.TINGWU_MODEL or "paraformer-realtime-v2"
         self.api_key = app_settings.DASHSCOPE_API_KEY
-        assert self.api_key, "DASHSCOPE_API_KEY is required"
-        self.app_id = getattr(app_settings, "TINGWU_APP_ID", None)
+        if not self.api_key:
+            raise AsrError("DASHSCOPE_API_KEY is required for TingWu SDK")
+
+        self.app_id = app_settings.TINGWU_APP_ID
+        if not self.app_id:
+            raise AsrError("TINGWU_APP_ID is required for TingWu SDK")
+
         self.base_address = getattr(app_settings, "TINGWU_BASE_ADDRESS", None)
         self.audio_format = app_settings.TINGWU_FORMAT or "pcm"
         self.sample_rate = int(app_settings.TINGWU_SR or 16000)
@@ -122,7 +128,7 @@ class SDKTingWuASR:
         callback = self._Cb()
         try:
             tingwu = TingWuRealtime(
-                model=None,
+                model=self.model,
                 audio_format=self.audio_format,
                 sample_rate=self.sample_rate,
                 app_id=self.app_id,

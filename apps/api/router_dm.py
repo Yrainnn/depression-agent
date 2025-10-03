@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from packages.common.config import settings
 from services.orchestrator.langgraph_min import orchestrator
 from services.report.build import build_pdf
 from services.store.repository import repository
@@ -189,6 +190,19 @@ async def debug_risk(sid: str) -> Dict[str, Any]:
             }
             for item in items
         ],
+    }
+
+
+@router.get("/debug/asr")
+async def debug_asr() -> Dict[str, Any]:
+    await _rate_limit()
+
+    return {
+        "provider": settings.ASR_PROVIDER,
+        "model": settings.TINGWU_MODEL,
+        "app_id_present": bool(settings.TINGWU_APP_ID),
+        "sr": settings.TINGWU_SR,
+        "format": settings.TINGWU_FORMAT,
     }
 
 
