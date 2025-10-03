@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from packages.common.config import settings
-from services.audio.asr_adapter import AsrError, StubASR, TingWuASR
+from services.audio.asr_adapter import AsrError, StubASR
 from services.risk.engine import engine as risk_engine
 from services.store.repository import repository
 
@@ -87,14 +87,15 @@ class LangGraphMini:
         self.repo = repository
         self.window_n = self._read_int_env("WINDOW_N", default=8)
         self.window_seconds = self._read_int_env("WINDOW_SECONDS", default=90)
-        provider = os.getenv("ASR_PROVIDER", "").strip().lower()
         self.stub_asr = StubASR()
-        if provider == "tingwu":
+        if settings.ASR_PROVIDER == "tingwu":
             try:
-                self.asr = TingWuASR(settings)
+                from services.audio.asr_adapter import SDKTingWuASR
+
+                self.asr = SDKTingWuASR(settings)
             except Exception as exc:  # pragma: no cover - configuration guard
                 LOGGER.warning(
-                    "Failed to initialise TingWuASR, using stub instead: %s", exc
+                    "Failed to initialise SDKTingWuASR, using stub instead: %s", exc
                 )
                 self.asr = self.stub_asr
         else:

@@ -80,6 +80,13 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 - **CoSyVoice TTS**：在 `services/tts/tts_adapter.py` 中调用真实语音合成接口，返回或缓存生成的语音资源。
 - **真实 LLM**：在 `.env` 配置 `DEEPSEEK_API_BASE`（可选）、`DEEPSEEK_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。
 
+## 听悟 SDK 版接入
+
+- **依赖**：安装 `dashscope>=1.24.4`（项目 `requirements` 已包含）。
+- **环境变量**：必须配置 `DASHSCOPE_API_KEY`，并根据实际情况可选提供 `TINGWU_APP_ID`、`TINGWU_BASE_ADDRESS`。
+- **音频要求**：输入需为 16 kHz、单声道音频，推荐统一通过 `ffmpeg -y -i input.wav -ac 1 -ar 16000 output.wav` 转码。
+- **与旧实现差异**：SDK 方案直接使用 `dashscope` 的 `TingWuRealtime` 回调，无需自行调用 `CreateTask`、维护 WebSocket 推流或轮询 `GetTaskInfo`，发送整段音频即可等待回调结果。
+
 ## 接入听悟实时识别（CreateTask→WS 推流→GetTaskInfo）
 
 - **必要参数**：`TINGWU_APPKEY`、`TINGWU_AK_ID`、`TINGWU_AK_SECRET`、`TINGWU_REGION`（默认 `cn-shanghai`）、`TINGWU_BASE`（REST 接口基址）、`TINGWU_WS_BASE`（WebSocket 推流入口）、`TINGWU_SR`（采样率，建议 `16000`）、`TINGWU_FORMAT`（音频格式，如 `pcm`/`opus`/`aac`/`speex`/`mp3`）、`TINGWU_LANG`（语言，可选 `cn`/`en`/`yue`/`ja`/`ko` 或 `multilingual` 搭配 `LanguageHints`）。

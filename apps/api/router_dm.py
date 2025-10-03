@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -69,6 +71,43 @@ async def dm_step(payload: StepRequest) -> StepResponse:
     return StepResponse(**result)
 
 
+class AsrTranscribeRequest(BaseModel):
+    sid: str
+    text: Optional[str] = None
+    audio_ref: Optional[str] = None
+
+
+class AsrTranscribeResponse(BaseModel):
+    sid: str
+    segments_count: int
+    json_url: str
+
+
+@router.post("/asr/transcribe", response_model=AsrTranscribeResponse)
+async def asr_transcribe(payload: AsrTranscribeRequest) -> AsrTranscribeResponse:
+    _validate_sid(payload.sid)
+
+    audio_ref = payload.audio_ref
+    if audio_ref and audio_ref.startswith("file://"):
+        audio_ref = audio_ref[7:]
+
+    try:
+        segments = orchestrator.asr.transcribe(text=payload.text, audio_ref=audio_ref)
+    except Exception as exc:  # pragma: no cover - passthrough errors to client
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    transcripts_dir = Path("/tmp/transcripts")
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = transcripts_dir / f"{payload.sid}.json"
+    transcript_path.write_text(json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return AsrTranscribeResponse(
+        sid=payload.sid,
+        segments_count=len(segments),
+        json_url=f"file://{transcript_path}",
+    )
+
+
 @router.post("/upload/audio")
 async def upload_audio(
     sid: str = Form(..., description="Conversation session identifier"),
@@ -80,14 +119,38 @@ async def upload_audio(
     dest_dir = upload_root / sid
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    original_suffix = Path(file.filename or "").suffix
-    suffix = original_suffix if original_suffix else ".wav"
-    dest_path = dest_dir / f"{uuid4().hex}{suffix}"
-
+    original_suffix = Path(file.filename or "").suffix or ".tmp"
+    original_path = dest_dir / f"{uuid4().hex}{original_suffix}"
     data = await file.read()
-    dest_path.write_bytes(data)
+    original_path.write_bytes(data)
 
-    return {"audio_ref": f"file://{dest_path}"}
+    converted_path = dest_dir / f"{uuid4().hex}.wav"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(original_path),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(converted_path),
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except FileNotFoundError as exc:  # pragma: no cover - environment specific
+        raise HTTPException(status_code=500, detail="ffmpeg not available") from exc
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500, detail="audio conversion failed") from exc
+    finally:
+        try:
+            if original_path.exists() and original_path != converted_path:
+                original_path.unlink()
+        except OSError:
+            pass
+
+    return {"audio_ref": f"file://{converted_path}"}
 
 
 @router.get("/debug/session/{sid}")
