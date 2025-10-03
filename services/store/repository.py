@@ -192,28 +192,55 @@ class ConversationRepository:
             risk_key,
             event,
             ttl=self.RISK_TTL_SECONDS,
-            legacy_keys=[f"session:{session_id}:risk:events"],
+            legacy_keys=[
+                f"session:{session_id}:risk:events",
+                f"risk:events:{session_id}",
+            ],
         )
         self.push_risk_event_stream(session_id, event)
+
+    def push_risk_event(self, session_id: str, payload: Dict[str, Any]) -> None:
+        """Alias for backward compatibility."""
+
+        self.append_risk_event(session_id, payload)
 
     def load_risk_events(self, session_id: str) -> List[Dict[str, Any]]:
         return self._get_list(
             self._key("risk", "events", session_id),
-            legacy_keys=[f"session:{session_id}:risk:events"],
+            legacy_keys=[
+                f"session:{session_id}:risk:events",
+                f"risk:events:{session_id}",
+            ],
         )
 
-    def push_risk_event_stream(self, session_id: str, payload: Dict[str, Any]) -> str:
+    def push_risk_event_stream(
+        self,
+        session_id: str,
+        payload: Dict[str, Any],
+        maxlen: int = 1000,
+    ) -> str:
         """Append a risk event to the Redis stream for the session."""
 
         if self._client is None:
             return ""
 
         stream_key = f"{self._key('risk', 'events', session_id)}:stream"
+        flat_payload: Dict[str, str] = {}
+        for key, value in payload.items():
+            if value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                flat_payload[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                flat_payload[key] = str(value)
+        if not flat_payload:
+            flat_payload["raw"] = json.dumps(payload, ensure_ascii=False)
+
         try:
             entry_id = self._client.xadd(
                 stream_key,
-                {"event": json.dumps(payload, ensure_ascii=False)},
-                maxlen=1000,
+                flat_payload,
+                maxlen=maxlen,
                 approximate=True,
             )
             try:
@@ -232,36 +259,42 @@ class ConversationRepository:
         stream_key = f"{risk_key}:stream"
         if self._client is not None and count > 0:
             try:
-                entries = self._client.xrange(stream_key, "-", "+")
+                entries = self._client.xrevrange(stream_key, "+", "-", count=count)
             except Exception:  # pragma: no cover - runtime guard
                 LOGGER.exception("Failed to read risk stream %s", stream_key)
             else:
                 if entries:
-                    sliced = entries[-count:]
                     results: List[Dict[str, Any]] = []
-                    for entry_id, payload in sliced:
-                        raw_event = payload.get("event") if isinstance(payload, dict) else None
-                        if not raw_event:
-                            continue
-                        try:
-                            event = json.loads(raw_event)
-                        except json.JSONDecodeError:
-                            LOGGER.error(
-                                "Malformed risk event in stream %s: %s", stream_key, raw_event
-                            )
-                            continue
-                        if isinstance(event, dict):
-                            results.append(
-                                {
-                                    "id": entry_id,
-                                    "ts": event.get("ts"),
-                                    "reason": event.get("reason"),
-                                    "match_text": event.get("match_text"),
-                                    "raw": event,
-                                }
-                            )
+                    for entry_id, payload in entries:
+                        event: Dict[str, Any] = {}
+                        raw_blob: Optional[str] = None
+                        if isinstance(payload, dict):
+                            for key, value in payload.items():
+                                event[key] = value
+                                if key == "raw":
+                                    raw_blob = value
+                        if raw_blob:
+                            try:
+                                decoded = json.loads(raw_blob)
+                                if isinstance(decoded, dict):
+                                    event = {**decoded, **event}
+                            except json.JSONDecodeError:
+                                LOGGER.error(
+                                    "Malformed raw risk event in stream %s: %s",
+                                    stream_key,
+                                    raw_blob,
+                                )
+                        results.append(
+                            {
+                                "id": entry_id,
+                                "ts": event.get("ts"),
+                                "reason": event.get("reason"),
+                                "match_text": event.get("match_text"),
+                                "raw": event or payload,
+                            }
+                        )
                     if results:
-                        return results
+                        return list(reversed(results))
 
         legacy_events = self.load_risk_events(session_id)
         if count > 0:

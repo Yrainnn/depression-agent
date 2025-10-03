@@ -99,14 +99,32 @@ class LangGraphMini:
             "tts_text": None,
         }
 
-    def step(self, sid: str, segments: Optional[List[Dict[str, object]]] = None) -> Dict[str, object]:
+    def step(
+        self,
+        sid: str,
+        role: Optional[str] = None,
+        text: Optional[str] = None,
+        audio_ref: Optional[str] = None,
+        segments: Optional[List[Dict[str, object]]] = None,
+    ) -> Dict[str, object]:
         state = self._load_state(sid)
         LOGGER.debug("Loaded state for %s: %s", sid, state)
 
         if state.completed:
             return self._complete_payload(state, "评估已完成，可导出报告。")
 
-        prepared_segments = self._prepare_segments(state, segments)
+        raw_segments: List[Dict[str, object]] = []
+        if segments is not None:
+            raw_segments.extend(segments)
+        elif text or audio_ref:
+            from services.audio import asr_adapter  # Local import to avoid cycles
+
+            if text:
+                raw_segments.extend(asr_adapter.transcribe(text=text))
+            if audio_ref:
+                raw_segments.extend(asr_adapter.transcribe(audio_ref=audio_ref))
+
+        prepared_segments = self._prepare_segments(state, raw_segments)
         if prepared_segments:
             for segment in prepared_segments:
                 self.repo.append_transcript(sid, segment)
@@ -204,18 +222,19 @@ class LangGraphMini:
             if risk.level == "high":
                 now = datetime.now(timezone.utc).isoformat()
                 reason = "、".join(risk.triggers) if risk.triggers else "触发高风险关键词"
-                stream_payload = {
+                payload = {
                     "ts": now,
                     "reason": reason,
                     "match_text": text,
                 }
-                self.repo.push_risk_event_stream(sid, stream_payload)
-                list_payload = {
-                    **stream_payload,
-                    "level": risk.level,
-                    "triggers": risk.triggers,
-                }
-                self.repo.push_risk_event(sid, list_payload)
+                try:
+                    self.repo.push_risk_event_stream(sid, payload)
+                except Exception:  # pragma: no cover - runtime guard
+                    LOGGER.exception("Failed to push risk event to stream for %s", sid)
+                if hasattr(self.repo, "push_risk_event"):
+                    self.repo.push_risk_event(sid, payload)
+                elif hasattr(self.repo, "append_risk_event"):
+                    self.repo.append_risk_event(sid, payload)
                 state.completed = True
                 LOGGER.info("Risk detected for %s: %s", sid, risk.triggers)
                 return {
