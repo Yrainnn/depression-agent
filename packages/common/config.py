@@ -12,12 +12,15 @@ class Settings(BaseSettings):
 
     environment: str = Field("development", alias="ENVIRONMENT")
     redis_url: str = Field("redis://localhost:6379/0", alias="REDIS_URL")
-    llm_api_base: Optional[str] = Field(None, alias="LLM_API_BASE")
-    llm_api_key: Optional[str] = Field(None, alias="LLM_API_KEY")
-    asr_api_base: Optional[str] = Field(None, alias="ASR_API_BASE")
-    asr_api_key: Optional[str] = Field(None, alias="ASR_API_KEY")
-    tts_api_base: Optional[str] = Field(None, alias="TTS_API_BASE")
-    tts_api_key: Optional[str] = Field(None, alias="TTS_API_KEY")
+    deepseek_api_base: Optional[str] = Field(None, alias="DEEPSEEK_API_BASE")
+    deepseek_api_key: Optional[str] = Field(None, alias="DEEPSEEK_API_KEY")
+    alibaba_cloud_access_key_id: Optional[str] = Field(
+        None, alias="ALIBABA_CLOUD_ACCESS_KEY_ID"
+    )
+    alibaba_cloud_access_key_secret: Optional[str] = Field(
+        None, alias="ALIBABA_CLOUD_ACCESS_KEY_SECRET"
+    )
+    dashscope_api_key: Optional[str] = Field(None, alias="DASHSCOPE_API_KEY")
 
     class Config:
         env_file = ".env"

@@ -45,9 +45,9 @@ cp .env.example .env
 
 ### 组件说明
 
-- **ASR Stub**：`services/audio/asr_adapter.py` 将文本直接映射为单个分段。后续如需接入阿里云听悟（TingWu）等服务，可在此替换实现。
-- **TTS Stub**：`services/tts/tts_adapter.py` 仅记录日志。可在此处集成 CoSyVoice 或其他语音合成服务。
-- **LLM Stub**：`services/llm/json_client.py` 默认基于关键词返回结构化结果；如在 `.env` 中配置 `LLM_API_BASE` 与 `LLM_API_KEY`，会尝试调用兼容 `/chat/completions` 的 JSON-only 接口，失败后自动回退到 Stub。
+- **ASR Stub**：`services/audio/asr_adapter.py` 将文本直接映射为单个分段。后续如需接入阿里云听悟（TingWu）等服务，可在此替换实现，并在 `.env` 中配置 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`。
+- **TTS Stub**：`services/tts/tts_adapter.py` 仅记录日志。可在此处集成 CoSyVoice 或其他语音合成服务，对应 `.env` 中的 `DASHSCOPE_API_KEY`。
+- **LLM Stub**：`services/llm/json_client.py` 默认基于关键词返回结构化结果；如在 `.env` 中配置 `DEEPSEEK_API_BASE` 与 `DEEPSEEK_API_KEY`，会尝试调用兼容 `/chat/completions` 的 JSON-only 接口，失败后自动回退到 Stub。
 - **LangGraph Orchestrator**：`services/orchestrator/langgraph_min.py` 实现了最小 ask → collect_audio → llm_analyze → clarify/risk_check → advance_or_finish → summarize 的流程，最多触发两次澄清，并在检测到高风险时立即打断。
 - **风险引擎**：`services/risk/engine.py` 使用强触发关键词识别高风险事件，并写入 `risk:events`。
 - **PDF 报告**：`services/report/build.py` 使用 Jinja2 + WeasyPrint 生成临时 PDF 文件并返回本地路径。
@@ -57,7 +57,7 @@ cp .env.example .env
 
 - **TingWu ASR**：在 `services/audio/asr_adapter.py` 中实现 `transcribe` 的音频路径处理与 API 调用，并在返回值中保留分段结构。
 - **CoSyVoice TTS**：在 `services/tts/tts_adapter.py` 中调用真实语音合成接口，返回或缓存生成的语音资源。
-- **真实 LLM**：在 `.env` 配置 `LLM_API_BASE`、`LLM_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。
+- **真实 LLM**：在 `.env` 配置 `DEEPSEEK_API_BASE`（可选）、`DEEPSEEK_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。
 
 ## 注意事项
 

@@ -30,8 +30,8 @@ class AnalysisResult(BaseModel):
 
 @dataclass
 class LLMJSONClient:
-    base_url: Optional[str] = settings.llm_api_base
-    api_key: Optional[str] = settings.llm_api_key
+    base_url: Optional[str] = settings.deepseek_api_base
+    api_key: Optional[str] = settings.deepseek_api_key
     model: str = "gpt-4o-mini"
     max_retries: int = 2
 
