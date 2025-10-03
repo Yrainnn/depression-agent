@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from packages.common.config import settings
+from services.audio.asr_adapter import AsrError, StubASR, TingWuASR
 from services.risk.engine import engine as risk_engine
 from services.store.repository import repository
 
@@ -54,6 +56,8 @@ VAGUE_PHRASES = [
     "凑合",
 ]
 
+MISSING_INPUT_PROMPT = "未获取音频/文本，请重新描述一次好吗？"
+
 
 SCORE_KEYWORDS: Dict[int, List[str]] = {
     3: ["几乎每天", "每天", "总是", "一直"],
@@ -83,6 +87,18 @@ class LangGraphMini:
         self.repo = repository
         self.window_n = self._read_int_env("WINDOW_N", default=8)
         self.window_seconds = self._read_int_env("WINDOW_SECONDS", default=90)
+        provider = os.getenv("ASR_PROVIDER", "").strip().lower()
+        self.stub_asr = StubASR()
+        if provider == "tingwu":
+            try:
+                self.asr = TingWuASR(settings)
+            except Exception as exc:  # pragma: no cover - configuration guard
+                LOGGER.warning(
+                    "Failed to initialise TingWuASR, using stub instead: %s", exc
+                )
+                self.asr = self.stub_asr
+        else:
+            self.asr = self.stub_asr
 
     # ------------------------------------------------------------------
     def ask(self, sid: str) -> Dict[str, object]:
@@ -117,12 +133,34 @@ class LangGraphMini:
         if segments is not None:
             raw_segments.extend(segments)
         elif text or audio_ref:
-            from services.audio import asr_adapter  # Local import to avoid cycles
-
+            text_segments: List[Dict[str, object]] = []
             if text:
-                raw_segments.extend(asr_adapter.transcribe(text=text))
+                text_segments = self.stub_asr.transcribe(text=text)
+
+            audio_segments: List[Dict[str, object]] = []
             if audio_ref:
-                raw_segments.extend(asr_adapter.transcribe(audio_ref=audio_ref))
+                try:
+                    audio_segments = self.asr.transcribe(text=None, audio_ref=audio_ref)
+                except AsrError as exc:
+                    LOGGER.warning("ASR audio transcription failed for %s: %s", sid, exc)
+                    if text_segments:
+                        raw_segments.extend(text_segments)
+                        text_segments = []
+                    else:
+                        self._persist_state(state)
+                        return {
+                            "next_utterance": MISSING_INPUT_PROMPT,
+                            "progress": {"index": state.index, "total": state.total},
+                            "risk_flag": False,
+                            "tts_text": None,
+                        }
+                else:
+                    raw_segments.extend(text_segments)
+                    raw_segments.extend(audio_segments)
+                    text_segments = []
+
+            if text_segments:
+                raw_segments.extend(text_segments)
 
         prepared_segments = self._prepare_segments(state, raw_segments)
         if prepared_segments:

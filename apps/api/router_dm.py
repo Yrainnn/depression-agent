@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from services.audio import asr_adapter
 from services.orchestrator.langgraph_min import orchestrator
 from services.report.build import build_pdf
 from services.store.repository import repository
@@ -31,7 +32,7 @@ def _validate_sid(sid: str) -> None:
 class StepRequest(BaseModel):
     sid: str = Field(..., description="Conversation session identifier")
     text: Optional[str] = Field(None, description="Patient utterance text")
-    audio_ref: Optional[str] = Field(None, description="Reserved for future audio input")
+    audio_ref: Optional[str] = Field(None, description="Audio reference (path or URL)")
 
 
     class Config:
@@ -41,8 +42,9 @@ class StepRequest(BaseModel):
 class StepResponse(BaseModel):
     next_utterance: str
     progress: Dict[str, Any]
-    risk: Optional[Dict[str, Any]] = None
-    analysis: Optional[Dict[str, Any]] = None
+    risk_flag: bool
+    tts_text: Optional[str] = None
+    tts_url: Optional[str] = None
 
 
 @router.post("/dm/step", response_model=StepResponse)
@@ -55,14 +57,37 @@ async def dm_step(payload: StepRequest) -> StepResponse:
             return StepResponse(**result)
         raise HTTPException(status_code=400, detail="text or audio_ref must be provided")
 
-    segments = []
-    if payload.text:
-        segments.extend(asr_adapter.transcribe(text=payload.text))
-    if payload.audio_ref:
-        segments.extend(asr_adapter.transcribe(audio_ref=payload.audio_ref))
+    audio_ref = payload.audio_ref
+    if audio_ref and audio_ref.startswith("file://"):
+        audio_ref = audio_ref[7:]
 
-    result = orchestrator.step(payload.sid, segments=segments)
+    result = orchestrator.step(
+        payload.sid,
+        text=payload.text,
+        audio_ref=audio_ref,
+    )
     return StepResponse(**result)
+
+
+@router.post("/upload/audio")
+async def upload_audio(
+    sid: str = Form(..., description="Conversation session identifier"),
+    file: UploadFile = File(..., description="Audio file to upload"),
+) -> Dict[str, Any]:
+    _validate_sid(sid)
+
+    upload_root = Path("/tmp/tingwu_uploads")
+    dest_dir = upload_root / sid
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    original_suffix = Path(file.filename or "").suffix
+    suffix = original_suffix if original_suffix else ".wav"
+    dest_path = dest_dir / f"{uuid4().hex}{suffix}"
+
+    data = await file.read()
+    dest_path.write_bytes(data)
+
+    return {"audio_ref": f"file://{dest_path}"}
 
 
 @router.get("/debug/session/{sid}")
