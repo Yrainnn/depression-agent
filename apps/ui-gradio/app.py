@@ -5,6 +5,14 @@ from typing import Any, Dict, List, Tuple
 
 import gradio as gr
 
+import os
+import sys
+# 获取项目根目录（根据目录结构，根目录是 app.py 上两级目录）
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+# 把根目录加入 PYTHONPATH
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+    
 from services.audio import asr_adapter
 from services.orchestrator.langgraph_min import orchestrator
 
