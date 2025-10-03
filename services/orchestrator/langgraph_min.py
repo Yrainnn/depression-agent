@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -201,9 +202,20 @@ class LangGraphMini:
                 continue
             risk = risk_engine.evaluate(text)
             if risk.level == "high":
-                self.repo.append_risk_event(
-                    sid, {"level": risk.level, "triggers": risk.triggers}
-                )
+                now = datetime.now(timezone.utc).isoformat()
+                reason = "、".join(risk.triggers) if risk.triggers else "触发高风险关键词"
+                stream_payload = {
+                    "ts": now,
+                    "reason": reason,
+                    "match_text": text,
+                }
+                self.repo.push_risk_event_stream(sid, stream_payload)
+                list_payload = {
+                    **stream_payload,
+                    "level": risk.level,
+                    "triggers": risk.triggers,
+                }
+                self.repo.push_risk_event(sid, list_payload)
                 state.completed = True
                 LOGGER.info("Risk detected for %s: %s", sid, risk.triggers)
                 return {

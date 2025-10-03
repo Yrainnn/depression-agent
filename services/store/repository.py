@@ -155,7 +155,7 @@ class ConversationRepository:
     def load_scores(self, session_id: str) -> Any:
         data = self._get(
             self._key("score", session_id),
-            legacy_keys=[f"session:{session_id}:score"],
+            legacy_keys=[f"score:{session_id}", f"session:{session_id}:score"],
         )
         if not data:
             return []
@@ -194,13 +194,91 @@ class ConversationRepository:
             ttl=self.RISK_TTL_SECONDS,
             legacy_keys=[f"session:{session_id}:risk:events"],
         )
-        self._append_to_risk_stream(risk_key, event)
+        self.push_risk_event_stream(session_id, event)
 
     def load_risk_events(self, session_id: str) -> List[Dict[str, Any]]:
         return self._get_list(
             self._key("risk", "events", session_id),
             legacy_keys=[f"session:{session_id}:risk:events"],
         )
+
+    def push_risk_event_stream(self, session_id: str, payload: Dict[str, Any]) -> str:
+        """Append a risk event to the Redis stream for the session."""
+
+        if self._client is None:
+            return ""
+
+        stream_key = f"{self._key('risk', 'events', session_id)}:stream"
+        try:
+            entry_id = self._client.xadd(
+                stream_key,
+                {"event": json.dumps(payload, ensure_ascii=False)},
+                maxlen=1000,
+                approximate=True,
+            )
+            try:
+                self._client.expire(stream_key, self.RISK_TTL_SECONDS)
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to set TTL for %s", stream_key)
+            return entry_id
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to append to risk stream %s", stream_key)
+            return ""
+
+    def get_risk_recent(self, session_id: str, count: int = 20) -> List[Dict[str, Any]]:
+        """Return recent risk events, preferring Redis Streams when available."""
+
+        risk_key = self._key("risk", "events", session_id)
+        stream_key = f"{risk_key}:stream"
+        if self._client is not None and count > 0:
+            try:
+                entries = self._client.xrange(stream_key, "-", "+")
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to read risk stream %s", stream_key)
+            else:
+                if entries:
+                    sliced = entries[-count:]
+                    results: List[Dict[str, Any]] = []
+                    for entry_id, payload in sliced:
+                        raw_event = payload.get("event") if isinstance(payload, dict) else None
+                        if not raw_event:
+                            continue
+                        try:
+                            event = json.loads(raw_event)
+                        except json.JSONDecodeError:
+                            LOGGER.error(
+                                "Malformed risk event in stream %s: %s", stream_key, raw_event
+                            )
+                            continue
+                        if isinstance(event, dict):
+                            results.append(
+                                {
+                                    "id": entry_id,
+                                    "ts": event.get("ts"),
+                                    "reason": event.get("reason"),
+                                    "match_text": event.get("match_text"),
+                                    "raw": event,
+                                }
+                            )
+                    if results:
+                        return results
+
+        legacy_events = self.load_risk_events(session_id)
+        if count > 0:
+            legacy_events = legacy_events[-count:]
+        parsed: List[Dict[str, Any]] = []
+        for event in legacy_events:
+            if isinstance(event, dict):
+                parsed.append(
+                    {
+                        "id": event.get("id"),
+                        "ts": event.get("ts"),
+                        "reason": event.get("reason"),
+                        "match_text": event.get("match_text"),
+                        "raw": event,
+                    }
+                )
+        return parsed
 
     # OSS placeholders ----------------------------------------------------
     def save_oss_reference(self, session_id: str, reference: Dict[str, Any]) -> None:
@@ -215,16 +293,6 @@ class ConversationRepository:
             self._key("oss", session_id),
             legacy_keys=[f"session:{session_id}:oss"],
         )
-
-    def _append_to_risk_stream(self, risk_key: str, event: Dict[str, Any]) -> None:
-        if self._client is None:
-            return
-        stream_key = f"{risk_key}:stream"
-        try:
-            self._client.xadd(stream_key, {"event": json.dumps(event, ensure_ascii=False)})
-            self._client.expire(stream_key, self.RISK_TTL_SECONDS)
-        except Exception:  # pragma: no cover - runtime guard
-            LOGGER.exception("Failed to append to risk stream %s", stream_key)
 
     def ping(self) -> bool:
         """Return True when the Redis client responds to PING."""

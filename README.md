@@ -85,10 +85,15 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 - 禁止引入向量检索或 RAG 依赖，所有证据均基于最近分段直接传递。
 - `.env.example` 提供了所有必要的环境变量，请根据实际部署环境调整。
 
-## 开发辅助脚本
+## 开发工具
 
 - 清理指定会话缓存：`python scripts/cleanup_session.py --sid <SESSION_ID>`
 - （慎用）清空当前 Redis 数据库：`python scripts/cleanup_session.py --all` 并按提示输入 `FLUSH`
+
+```bash
+python /scripts/cleanup_session.py --sid demo1
+python /scripts/cleanup_session.py --all
+```
 
 ## Redis 配置与调优
 

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from services.audio import asr_adapter
 from services.orchestrator.langgraph_min import orchestrator
-from services.report.build import build_report
+from services.report.build import build_pdf
 from services.store.repository import repository
 
 router = APIRouter()
@@ -75,9 +75,10 @@ async def debug_session(sid: str) -> Dict[str, Any]:
     scores = repository.load_scores(sid)
 
     return {
+        "sid": sid,
         "state": state,
         "transcripts_count": len(transcripts),
-        "score_present": bool(scores),
+        "score_exists": bool(scores),
     }
 
 
@@ -86,10 +87,21 @@ async def debug_risk(sid: str) -> Dict[str, Any]:
     _validate_sid(sid)
     await _rate_limit()
 
-    events = repository.load_risk_events(sid)
-    recent_events = events[-20:]
+    items = repository.get_risk_recent(sid, count=20)
 
-    return {"events": recent_events}
+    return {
+        "sid": sid,
+        "count": len(items),
+        "items": [
+            {
+                "id": item.get("id"),
+                "ts": item.get("ts"),
+                "reason": item.get("reason"),
+                "match_text": item.get("match_text"),
+            }
+            for item in items
+        ],
+    }
 
 
 class ReportRequest(BaseModel):
@@ -106,17 +118,20 @@ class ReportResponse(BaseModel):
 @router.post("/report/build", response_model=ReportResponse)
 async def report_build(payload: ReportRequest) -> ReportResponse:
     state = repository.load_session_state(payload.sid)
-    transcripts = repository.load_transcripts(payload.sid)
     scores_payload = repository.load_scores(payload.sid)
+    summary = state.get("summary")
+    score_json: Dict[str, Any]
     if isinstance(scores_payload, dict):
-        scores = scores_payload.get("per_item_scores", [])
-        opinion = scores_payload.get("opinion")
+        score_json = dict(scores_payload)
     else:
-        scores = scores_payload
-        opinion = None
-    summary = state.get("summary", "感谢配合，本次访谈总结如下。")
-    if opinion and not summary:
-        summary = opinion
+        score_json = {"per_item_scores": list(scores_payload or [])}
 
-    report_url = build_report(payload.sid, summary, scores, transcripts)
-    return ReportResponse(report_url=report_url)
+    if summary:
+        score_json.setdefault("summary", summary)
+        if isinstance(score_json.get("opinion"), dict):
+            score_json["opinion"].setdefault("summary", summary)
+        elif summary:
+            score_json["opinion"] = {"summary": summary}
+
+    report_payload = build_pdf(payload.sid, score_json)
+    return ReportResponse(**report_payload)
