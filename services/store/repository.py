@@ -139,18 +139,32 @@ class ConversationRepository:
         )
 
     # Scores --------------------------------------------------------------
-    def save_scores(self, session_id: str, scores: List[Dict[str, Any]]) -> None:
+    def save_scores(self, session_id: str, scores: Any) -> None:
+        if isinstance(scores, dict):
+            payload = dict(scores)
+            payload.setdefault("per_item_scores", payload.get("items", []))
+        else:
+            payload = {"per_item_scores": list(scores or [])}
+        payload.setdefault("items", payload.get("per_item_scores", []))
         self._set(
             self._key("score", session_id),
-            {"items": scores},
+            payload,
             ttl=self.SCORE_TTL_SECONDS,
         )
 
-    def load_scores(self, session_id: str) -> List[Dict[str, Any]]:
-        return self._get_list(
+    def load_scores(self, session_id: str) -> Any:
+        data = self._get(
             self._key("score", session_id),
             legacy_keys=[f"session:{session_id}:score"],
         )
+        if not data:
+            return []
+        if isinstance(data, dict) and (
+            "per_item_scores" in data or "total_score" in data or "opinion" in data
+        ):
+            data.setdefault("per_item_scores", data.get("items", []))
+            return data
+        return data.get("items", [])
 
     # Transcripts ---------------------------------------------------------
     def append_transcript(self, session_id: str, segment: Dict[str, Any]) -> None:

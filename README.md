@@ -43,6 +43,27 @@ cp .env.example .env
 2. `POST /dm/step` 仅支持文本输入，返回下一轮问句与进度信息
 3. `POST /report/build` 基于当前对话生成本地 PDF 并返回 `file://` 路径
 
+### API 测试示例
+
+> 所有请求体字段已统一为 `sid`，旧的 `session_id` 不再使用。
+
+```bash
+# 获取首问
+curl -X POST "http://127.0.0.1:8080/dm/step" \
+  -H "Content-Type: application/json" \
+  -d '{"sid":"demo-session","role":"user"}'
+
+# 追加一次对话轮次
+curl -X POST "http://127.0.0.1:8080/dm/step" \
+  -H "Content-Type: application/json" \
+  -d '{"sid":"demo-session","role":"user","text":"最近睡得不太好"}'
+
+# 生成报告
+curl -X POST "http://127.0.0.1:8080/report/build" \
+  -H "Content-Type: application/json" \
+  -d '{"sid":"demo-session"}'
+```
+
 ### 组件说明
 
 - **ASR Stub**：`services/audio/asr_adapter.py` 将文本直接映射为单个分段。后续如需接入阿里云听悟（TingWu）等服务，可在此替换实现，并在 `.env` 中配置 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`。

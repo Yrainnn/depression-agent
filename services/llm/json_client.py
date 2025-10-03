@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -8,6 +9,20 @@ from pydantic import BaseModel, ValidationError, root_validator
 from packages.common.config import settings
 
 LOGGER = logging.getLogger(__name__)
+
+VAGUE_PHRASES = [
+    "还好",
+    "一般",
+    "差不多",
+    "说不清",
+    "不好说",
+    "看情况",
+    "可能吧",
+    "偶尔吧",
+    "有点吧",
+    "还行",
+    "凑合",
+]
 
 
 class SymptomScore(BaseModel):
@@ -110,7 +125,29 @@ class LLMJSONClient:
         raise RuntimeError(f"LLM call failed: {last_error}")
 
     # ------------------------------------------------------------------
-    def _mock_analysis(self, segments: List[Dict[str, Any]]) -> AnalysisResult:
+    def _mock_analysis(self, segments: List[Dict[str, Any]]) -> Any:
+        last_patient_text = ""
+        for segment in reversed(segments):
+            speaker = str(segment.get("speaker", "patient"))
+            if speaker and speaker != "patient":
+                continue
+            candidate = str(segment.get("text", "")).strip()
+            if candidate:
+                last_patient_text = candidate
+                break
+
+        if last_patient_text and self._is_vague(last_patient_text):
+            return {
+                "intent": "score_item",
+                "schema_id": "PHQ9.v1",
+                "item_tag": None,
+                "per_item_scores": [],
+                "evidence_spans": [],
+                "opinion": {"summary": "", "rationale": ""},
+                "total_score": 0,
+                "clarify_request": "请具体点：每周大概几天？",
+            }
+
         text = "\n".join(seg.get("text", "") for seg in segments)
         scores: List[SymptomScore] = []
         follow_up_questions: List[str] = []
@@ -133,6 +170,17 @@ class LLMJSONClient:
 
         summary = "患者分享了情绪与生活状态，建议继续跟进。"
         return AnalysisResult(summary=summary, scores=scores, follow_up_questions=follow_up_questions)
+
+    @staticmethod
+    def _is_vague(text: str) -> bool:
+        if not text:
+            return False
+        normalized = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE).lower()
+        for phrase in VAGUE_PHRASES:
+            phrase_norm = re.sub(r"[\s\W]+", "", phrase, flags=re.UNICODE).lower()
+            if phrase_norm and phrase_norm in normalized:
+                return True
+        return False
 
 
 client = LLMJSONClient()
