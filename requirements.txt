@@ -8,3 +8,8 @@ requests
 jinja2
 weasyprint
 redis
+httpx[http2]>=0.27
+websockets>=12.0
+tenacity>=8.2
+alibabacloud_tea_openapi>=0.3.8
+alibabacloud_credentials>=0.3.2
