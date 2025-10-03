@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
 
     environment: str = Field("development", alias="ENVIRONMENT")
-    redis_url: str = Field("redis://localhost:6379/0", alias="REDIS_URL")
+    redis_url: str = Field(..., alias="REDIS_URL")
+    redis_prefix: str = Field("da", alias="REDIS_PREFIX")
+    redis_password: Optional[str] = Field(None, alias="REDIS_PASSWORD")
     deepseek_api_base: Optional[str] = Field(None, alias="DEEPSEEK_API_BASE")
     deepseek_api_key: Optional[str] = Field(None, alias="DEEPSEEK_API_KEY")
     alibaba_cloud_access_key_id: Optional[str] = Field(

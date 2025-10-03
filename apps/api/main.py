@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Gauge, generate_latest
 
 from apps.api.router_dm import router as dm_router
+from services.store.repository import repository
 
 app = FastAPI(title="Depression Agent API", version="0.1.0")
 app.include_router(dm_router)
@@ -23,3 +24,10 @@ def health() -> JSONResponse:
 def metrics() -> Response:
     data = generate_latest(_registry)
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/debug/redis")
+def debug_redis() -> JSONResponse:
+    if repository.ping():
+        return JSONResponse({"redis": "pong"})
+    return JSONResponse({"error": "redis unreachable"}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)

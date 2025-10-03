@@ -63,3 +63,15 @@ cp .env.example .env
 
 - 禁止引入向量检索或 RAG 依赖，所有证据均基于最近分段直接传递。
 - `.env.example` 提供了所有必要的环境变量，请根据实际部署环境调整。
+
+## 开发辅助脚本
+
+- 清理指定会话缓存：`python scripts/cleanup_session.py --sid <SESSION_ID>`
+- （慎用）清空当前 Redis 数据库：`python scripts/cleanup_session.py --all` 并按提示输入 `FLUSH`
+
+## Redis 配置与调优
+
+- 配置 `/etc/redis/redis.conf` 时建议开启 `appendonly yes`，保留快照 `save 900 1`，如需限制内存可设置 `maxmemory-policy allkeys-lru`。
+- Redis 连接串示例（含密码）：`REDIS_URL=redis://:StrongPass@localhost:6379/0`。
+- 备份命令：`redis-cli SAVE` 或 `redis-cli BGREWRITEAOF`。
+- 常用排错命令：`redis-cli INFO`、`redis-cli SLOWLOG GET`、`redis-cli MONITOR`（开发期使用）。

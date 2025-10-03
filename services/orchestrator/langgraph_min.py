@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -28,6 +29,10 @@ class LangGraphMini:
     """A pragmatic orchestrator mimicking the LangGraph flow."""
 
     def __init__(self) -> None:
+        self.repo = repository
+        self.window_n = self._read_int_env("WINDOW_N", default=8)
+        self.window_seconds = self._read_int_env("WINDOW_SECONDS", default=90)
+
         self.clarification_questions = {
             "frequency": "这种情况大概多久发生一次？",
             "duration": "这种状态持续了多长时间？",
@@ -53,10 +58,13 @@ class LangGraphMini:
 
         prepared_segments = self._prepare_segments(state, user_text, segments)
         for segment in prepared_segments:
-            repository.append_transcript(session_id, segment)
+            self.repo.append_transcript(session_id, segment)
             LOGGER.debug("Appended transcript: %s", segment)
 
-        transcripts = repository.load_transcripts(session_id)
+        transcripts = self.repo.get_transcripts(session_id)
+        scoring_segments = self._latest_segments(
+            transcripts, self.window_n, self.window_seconds
+        )
 
         for segment in prepared_segments:
             text = segment.get("text") or ""
@@ -64,7 +72,7 @@ class LangGraphMini:
                 continue
             risk = risk_engine.evaluate(text)
             if risk.level == "high":
-                repository.append_risk_event(
+                self.repo.append_risk_event(
                     session_id,
                     {"level": risk.level, "triggers": risk.triggers},
                 )
@@ -77,11 +85,11 @@ class LangGraphMini:
                     "risk": {"level": risk.level, "triggers": risk.triggers},
                 }
 
-        analysis = self._run_analysis(transcripts)
+        analysis = self._run_analysis(scoring_segments)
         if analysis:
             state.summary = analysis.summary
             state.scores = [score.dict() for score in analysis.scores]
-            repository.save_scores(session_id, state.scores)
+            self.repo.save_scores(session_id, state.scores)
 
         next_gap = self._determine_gap(transcripts)
         response = self._advance_flow(state, next_gap, analysis)
@@ -168,7 +176,7 @@ class LangGraphMini:
         return prepared
 
     def _load_state(self, session_id: str) -> OrchestratorState:
-        raw = repository.load_session_state(session_id)
+        raw = self.repo.load_session_state(session_id)
         state = OrchestratorState(session_id=session_id)
         if raw:
             state.stage = raw.get("stage", state.stage)
@@ -182,7 +190,7 @@ class LangGraphMini:
         return state
 
     def _persist_state(self, state: OrchestratorState) -> None:
-        repository.save_session_state(
+        self.repo.save_session_state(
             state.session_id,
             {
                 "stage": state.stage,
@@ -195,6 +203,57 @@ class LangGraphMini:
                 "scores": state.scores,
             },
         )
+
+    def _latest_segments(
+        self,
+        transcripts: List[Dict[str, object]],
+        max_items: int,
+        max_seconds: int,
+    ) -> List[Dict[str, object]]:
+        if not transcripts:
+            return []
+
+        if max_items <= 0:
+            max_items = len(transcripts)
+
+        cutoff: Optional[float] = None
+        if max_seconds > 0:
+            last_end = self._segment_end(transcripts[-1])
+            if last_end is not None:
+                cutoff = last_end - float(max_seconds)
+
+        window: List[Dict[str, object]] = []
+        for segment in reversed(transcripts):
+            if len(window) >= max_items:
+                break
+
+            end_time = self._segment_end(segment)
+            if cutoff is not None and end_time is not None and end_time < cutoff:
+                break
+
+            window.append(segment)
+
+        return list(reversed(window))
+
+    @staticmethod
+    def _segment_end(segment: Dict[str, object]) -> Optional[float]:
+        ts = segment.get("ts")
+        if isinstance(ts, (list, tuple)) and ts:
+            for value in reversed(ts):
+                if isinstance(value, (int, float)):
+                    return float(value)
+        return None
+
+    @staticmethod
+    def _read_int_env(name: str, *, default: int) -> int:
+        raw = os.getenv(name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            LOGGER.warning("Invalid value for %s: %s; using default %s", name, raw, default)
+            return default
 
 
 orchestrator = LangGraphMini()
