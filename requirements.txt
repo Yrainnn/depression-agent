@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+prometheus-client
+gradio
+python-dotenv
+pydantic
+requests
+jinja2
+weasyprint
+redis
