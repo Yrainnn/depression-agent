@@ -66,7 +66,7 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 
 ### 组件说明
 
-- **ASR Stub**：`services/audio/asr_adapter.py` 将文本直接映射为单个分段。后续如需接入阿里云听悟（TingWu）等服务，可在此替换实现，并在 `.env` 中配置 `TINGWU_APPKEY`、`TINGWU_AK_ID`、`TINGWU_AK_SECRET` 等凭据。
+- **ASR Stub**：`services/audio/asr_adapter.py` 将文本直接映射为单个分段。后续如需接入阿里云听悟（TingWu）等服务，可在此替换实现，并在 `.env` 中配置 `TINGWU_APPKEY`、`TINGWU_AK_ID`、`TINGWU_AK_SECRET` 等凭据，同时自行引入所需 SDK 依赖。
 - **TTS Stub**：`services/tts/tts_adapter.py` 仅记录日志。可在此处集成 CoSyVoice 或其他语音合成服务，对应 `.env` 中的 `DASHSCOPE_API_KEY`。
 - **LLM Stub**：`services/llm/json_client.py` 默认基于关键词返回结构化结果；如在 `.env` 中配置 `DEEPSEEK_API_BASE` 与 `DEEPSEEK_API_KEY`，会尝试调用兼容 `/chat/completions` 的 JSON-only 接口，失败后自动回退到 Stub。
 - **LangGraph Orchestrator**：`services/orchestrator/langgraph_min.py` 实现了最小 ask → collect_audio → llm_analyze → clarify/risk_check → advance_or_finish → summarize 的流程，最多触发两次澄清，并在检测到高风险时立即打断。
@@ -82,7 +82,9 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 
 ## 听悟 SDK 版接入
 
-- **依赖**：安装 `dashscope>=1.24.4`（项目 `requirements` 已包含）。
+> **提示**：默认发行版已移除 DashScope TingWu SDK 依赖与实现，下述内容仅供参考。若要重新启用，请手动安装官方 SDK、恢复适配代码，并配置对应的凭据。
+
+- **依赖**：手动安装 `dashscope` 官方 SDK（建议参照官方文档选择合适的版本）。
 - **环境变量**：必须配置 `DASHSCOPE_API_KEY`，并根据实际情况可选提供 `TINGWU_APP_ID`、`TINGWU_BASE_ADDRESS`。
 - **音频要求**：输入需为 16 kHz、单声道音频，推荐统一通过 `ffmpeg -y -i input.wav -ac 1 -ar 16000 output.wav` 转码。
 - **与旧实现差异**：SDK 方案直接使用 `dashscope` 的 `TingWuRealtime` 回调，无需自行调用 `CreateTask`、维护 WebSocket 推流或轮询 `GetTaskInfo`，发送整段音频即可等待回调结果。

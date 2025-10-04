@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import List, Optional
 
 from packages.common.config import settings
@@ -39,112 +38,24 @@ class StubASR:
 
 
 class SDKTingWuASR:
-    """DashScope TingWu implementation used for realtime transcription."""
+    """Placeholder for the former DashScope TingWu integration."""
 
-    def __init__(self, app_settings):
-        self.model = getattr(app_settings, "TINGWU_MODEL", "paraformer-realtime-v2")
-        self.api_key = getattr(app_settings, "DASHSCOPE_API_KEY", None)
-        if not self.api_key:
-            raise AsrError("DASHSCOPE_API_KEY is required for TingWu SDK")
-
-        self.app_id = getattr(app_settings, "TINGWU_APP_ID", None)
-        if not self.app_id:
-            raise AsrError("TINGWU_APP_ID is required for TingWu SDK")
-
-        self.base_address = getattr(app_settings, "TINGWU_BASE_ADDRESS", None)
-        self.audio_format = getattr(app_settings, "TINGWU_FORMAT", "pcm")
-        self.sample_rate = int(
-            getattr(app_settings, "TINGWU_SR", None)
-            or getattr(app_settings, "TINGWU_SAMPLE_RATE", 16000)
+    def __init__(self, app_settings):  # pragma: no cover - configuration guard
+        self.model = app_settings.TINGWU_MODEL or "paraformer-realtime-v2"
+        self.api_key = app_settings.DASHSCOPE_API_KEY
+        self.app_id = app_settings.TINGWU_APP_ID
+        raise AsrError(
+            "DashScope TingWu SDK support has been removed from this deployment"
         )
-        self.lang = getattr(app_settings, "TINGWU_LANG", "cn")
-
-    class _Cb(TingWuRealtimeCallback):
-        def __init__(self):
-            self._inc = 0
-            self.segments: List[dict] = []
-
-        def on_recognize_result(self, result):  # type: ignore[override]
-            transcription = (
-                (result or {})
-                .get("payload", {})
-                .get("output", {})
-                .get("transcription", {})
-            )
-            if transcription.get("sentenceEnd") is True:
-                begin = transcription.get("beginTime") or 0
-                end = transcription.get("endTime") or 0
-                text = transcription.get("text") or ""
-                self._inc += 1
-                self.segments.append(
-                    {
-                        "utt_id": f"tw_{self._inc}",
-                        "text": text,
-                        "speaker": "patient",
-                        "ts": [begin / 1000.0, end / 1000.0],
-                        "conf": 0.95,
-                    }
-                )
-
-        def on_error(self, error):  # type: ignore[override]
-            LOGGER.debug("TingWu realtime error: %s", error)
-
-        def on_close(self):  # type: ignore[override]
-            LOGGER.debug("TingWu realtime closed")
-
-        def on_speech_listen(self, result):  # type: ignore[override]
-            LOGGER.debug("TingWu speech listen: %s", result)
-
-        def on_stopped(self, result):  # type: ignore[override]
-            LOGGER.debug("TingWu realtime stopped: %s", result)
-
-    def _read_bytes(self, path: str) -> bytes:
-        local_path = path.replace("file://", "") if path.startswith("file://") else path
-        if not os.path.exists(local_path):
-            raise AsrError(f"audio file not found: {local_path}")
-        return local_path
 
     def transcribe(
         self,
         text: Optional[str] = None,
         audio_ref: Optional[str] = None,
-    ) -> List[dict]:
-        if text:
-            return [
-                {
-                    "utt_id": "u1",
-                    "text": text,
-                    "speaker": "patient",
-                    "ts": [0, 0],
-                    "conf": 0.95,
-                }
-            ]
-
-        if not audio_ref:
-            raise AsrError("audio_ref required")
-
-        local_path = self._resolve_path(audio_ref)
-
-        try:
-            transcript = tingwu_client.transcribe(local_path)
-        except EnvironmentError as exc:  # pragma: no cover - configuration guard
-            raise AsrError(f"Tingwu client misconfigured: {exc}") from exc
-        except Exception as exc:  # pragma: no cover - network/SDK errors
-            raise AsrError(f"Tingwu client transcription failed: {exc}") from exc
-
-        transcript = transcript.strip()
-        if not transcript:
-            return []
-
-        return [
-            {
-                "utt_id": "tw_1",
-                "text": transcript,
-                "speaker": "patient",
-                "ts": [0, 0],
-                "conf": 0.95,
-            }
-        ]
+    ) -> List[dict]:  # pragma: no cover - configuration guard
+        raise AsrError(
+            "DashScope TingWu SDK support has been removed from this deployment"
+        )
 
 
 DEFAULT_ASR = StubASR()
