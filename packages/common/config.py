@@ -31,14 +31,25 @@ class Settings(BaseSettings):
         default_factory=lambda: os.getenv("DASHSCOPE_API_KEY"),
         alias="DASHSCOPE_API_KEY",
     )
-    tingwu_appkey: Optional[str] = Field(None, alias="TINGWU_APPKEY")
+    tingwu_appkey: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TINGWU_APPKEY")
+        or os.getenv("ALIBABA_TINGWU_APPKEY"),
+        alias="TINGWU_APPKEY",
+    )
+    alibaba_tingwu_appkey: Optional[str] = Field(
+        default_factory=lambda: os.getenv("ALIBABA_TINGWU_APPKEY"),
+        alias="ALIBABA_TINGWU_APPKEY",
+    )
     tingwu_app_id: Optional[str] = Field(
         default_factory=lambda: os.getenv("TINGWU_APP_ID"),
         alias="TINGWU_APP_ID",
     )
     tingwu_ak_id: Optional[str] = Field(None, alias="TINGWU_AK_ID")
     tingwu_ak_secret: Optional[str] = Field(None, alias="TINGWU_AK_SECRET")
-    tingwu_region: str = Field("cn-shanghai", alias="TINGWU_REGION")
+    tingwu_region: str = Field(
+        default_factory=lambda: os.getenv("TINGWU_REGION", "cn-beijing"),
+        alias="TINGWU_REGION",
+    )
     tingwu_base: str = Field("https://tingwu.aliyuncs.com", alias="TINGWU_BASE")
     tingwu_model: str = Field(
         default_factory=lambda: os.getenv("TINGWU_MODEL", "paraformer-realtime-v2"),
@@ -52,7 +63,11 @@ class Settings(BaseSettings):
         "wss://tingwu.aliyuncs.com/ws/v1", alias="TINGWU_WS_BASE"
     )
     tingwu_sr: int = Field(
-        default_factory=lambda: int(os.getenv("TINGWU_SR", "16000")),
+        default_factory=lambda: int(
+            os.getenv("TINGWU_SR")
+            or os.getenv("TINGWU_SAMPLE_RATE")
+            or "16000"
+        ),
         alias="TINGWU_SR",
     )
     tingwu_format: str = Field(
@@ -69,6 +84,10 @@ class Settings(BaseSettings):
     @property
     def DASHSCOPE_API_KEY(self) -> Optional[str]:
         return self.dashscope_api_key
+
+    @property
+    def TINGWU_APPKEY(self) -> Optional[str]:
+        return self.tingwu_appkey or self.alibaba_tingwu_appkey
 
     @property
     def TINGWU_APP_ID(self) -> Optional[str]:
