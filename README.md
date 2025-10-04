@@ -66,8 +66,8 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 
 ### 组件说明
 
-- **ASR Stub**：`services/audio/asr_adapter.py` 将文本直接映射为单个分段。后续如需接入阿里云听悟（TingWu）等服务，可在此替换实现，并在 `.env` 中配置 `TINGWU_APPKEY`、`TINGWU_AK_ID`、`TINGWU_AK_SECRET` 等凭据，同时自行引入所需 SDK 依赖。
-- **TTS Stub**：`services/tts/tts_adapter.py` 仅记录日志。可在此处集成 CoSyVoice 或其他语音合成服务，对应 `.env` 中的 `DASHSCOPE_API_KEY`。
+- **ASR 适配器**：`services/audio/asr_adapter.py` 统一封装 Stub 与听悟实现，默认回退到文本回声模式，仅在提供听悟凭据时启用真实识别。
+- **TTS Stub**：`services/tts/tts_adapter.py` 仅记录日志。可在此处集成 CoSyVoice 或其他语音合成服务，并在 `.env` 中配置所需的供应商凭据。
 - **LLM Stub**：`services/llm/json_client.py` 默认基于关键词返回结构化结果；如在 `.env` 中配置 `DEEPSEEK_API_BASE` 与 `DEEPSEEK_API_KEY`，会尝试调用兼容 `/chat/completions` 的 JSON-only 接口，失败后自动回退到 Stub。
 - **LangGraph Orchestrator**：`services/orchestrator/langgraph_min.py` 实现了最小 ask → collect_audio → llm_analyze → clarify/risk_check → advance_or_finish → summarize 的流程，最多触发两次澄清，并在检测到高风险时立即打断。
 - **风险引擎**：`services/risk/engine.py` 使用强触发关键词识别高风险事件，并写入 `risk:events`。
@@ -76,28 +76,20 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 
 ## 替换为真实服务
 
-- **TingWu ASR**：在 `services/audio/asr_adapter.py` 中实现 `transcribe` 的音频路径处理与 API 调用，并在返回值中保留分段结构。
+- **听悟 ASR**：`services/audio/asr_adapter.py` 会在检测到听悟凭据时自动启用 `services/audio/tingwu_client.py`，只需在 `.env` 中配置 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`ALIBABA_TINGWU_APPKEY`（或 `TINGWU_APPKEY`）、`TINGWU_APP_ID` 即可。
 - **CoSyVoice TTS**：在 `services/tts/tts_adapter.py` 中调用真实语音合成接口，返回或缓存生成的语音资源。
 - **真实 LLM**：在 `.env` 配置 `DEEPSEEK_API_BASE`（可选）、`DEEPSEEK_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。
 
-## 听悟 SDK 版接入
+## 听悟实时识别工作流
 
-> **提示**：默认发行版已移除 DashScope TingWu SDK 依赖与实现，下述内容仅供参考。若要重新启用，请手动安装官方 SDK、恢复适配代码，并配置对应的凭据。
+`services/audio/tingwu_client.py` 封装了 OpenAPI + Realtime SDK 的完整流程：创建实时任务、通过 NLS SDK 建会话推流 16 kHz 单声道音频，并在任务结束时停止服务返回整段文本。
 
-- **依赖**：手动安装 `dashscope` 官方 SDK（建议参照官方文档选择合适的版本）。
-- **环境变量**：必须配置 `DASHSCOPE_API_KEY`，并根据实际情况可选提供 `TINGWU_APP_ID`、`TINGWU_BASE_ADDRESS`。
-- **音频要求**：输入需为 16 kHz、单声道音频，推荐统一通过 `ffmpeg -y -i input.wav -ac 1 -ar 16000 output.wav` 转码。
-- **与旧实现差异**：SDK 方案直接使用 `dashscope` 的 `TingWuRealtime` 回调，无需自行调用 `CreateTask`、维护 WebSocket 推流或轮询 `GetTaskInfo`，发送整段音频即可等待回调结果。
-
-## 接入听悟实时识别（CreateTask→WS 推流→GetTaskInfo）
-
-- **必要参数**：`TINGWU_APPKEY`、`TINGWU_AK_ID`、`TINGWU_AK_SECRET`、`TINGWU_REGION`（默认 `cn-shanghai`）、`TINGWU_BASE`（REST 接口基址）、`TINGWU_WS_BASE`（WebSocket 推流入口）、`TINGWU_SR`（采样率，建议 `16000`）、`TINGWU_FORMAT`（音频格式，如 `pcm`/`opus`/`aac`/`speex`/`mp3`）、`TINGWU_LANG`（语言，可选 `cn`/`en`/`yue`/`ja`/`ko` 或 `multilingual` 搭配 `LanguageHints`）。
-- **实时流程**：
-  1. 调用 `CreateTask` 获取会话 `record_id` 与推流地址。
-  2. 通过 WebSocket (`TINGWU_WS_BASE`) 按文档要求发送 `start` → 音频帧 → `stop` 控制消息，推送 16 kHz 单声道音频。
-  3. 解析增量回包并在识别完成后调用 `GetTaskInfo` 拉取最终结果（离线兜底可重试该接口）。
-- **采样率与格式**：实时识别推荐 16 kHz/单声道，`TINGWU_SR=16000`、`TINGWU_FORMAT=pcm`。若使用 8 kHz 或其他压缩格式需与推流参数保持一致。
-- **限额提示**：根据官方文档，`CreateTask` QPS ≈ 20，`GetTaskInfo` QPS ≈ 100；请在批量处理或并发调用时做好限速与退避策略。
+- **必需凭据**：
+  - `ALIBABA_CLOUD_ACCESS_KEY_ID`
+  - `ALIBABA_CLOUD_ACCESS_KEY_SECRET`
+  - `ALIBABA_TINGWU_APPKEY`（或兼容字段 `TINGWU_APPKEY`）
+  - `TINGWU_APP_ID`
+- **推荐转码命令**：`ffmpeg -y -i input.wav -ac 1 -ar 16000 output.wav`
 
 ## 注意事项
 
