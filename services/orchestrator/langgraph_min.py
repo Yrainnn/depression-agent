@@ -88,7 +88,8 @@ class LangGraphMini:
         self.window_n = self._read_int_env("WINDOW_N", default=8)
         self.window_seconds = self._read_int_env("WINDOW_SECONDS", default=90)
         self.stub_asr = StubASR()
-        if settings.ASR_PROVIDER == "tingwu":
+        provider_name = getattr(settings, "ASR_PROVIDER", "")
+        if provider_name and provider_name.lower() == "tingwu":
             try:
                 from services.audio.asr_adapter import SDKTingWuASR
 
