@@ -38,14 +38,68 @@ class StubASR:
         return []
 
 
-class TingwuClientASR:
-    """Adapter wrapping the local Tingwu client implementation."""
+class SDKTingWuASR:
+    """DashScope TingWu implementation used for realtime transcription."""
 
-    def __init__(self, _app_settings=settings):  # pragma: no cover - simple init
-        self._settings = _app_settings
+    def __init__(self, app_settings):
+        self.model = getattr(app_settings, "TINGWU_MODEL", "paraformer-realtime-v2")
+        self.api_key = getattr(app_settings, "DASHSCOPE_API_KEY", None)
+        if not self.api_key:
+            raise AsrError("DASHSCOPE_API_KEY is required for TingWu SDK")
 
-    def _resolve_path(self, path: str) -> str:
-        local_path = path.replace("file://", "", 1) if path.startswith("file://") else path
+        self.app_id = getattr(app_settings, "TINGWU_APP_ID", None)
+        if not self.app_id:
+            raise AsrError("TINGWU_APP_ID is required for TingWu SDK")
+
+        self.base_address = getattr(app_settings, "TINGWU_BASE_ADDRESS", None)
+        self.audio_format = getattr(app_settings, "TINGWU_FORMAT", "pcm")
+        self.sample_rate = int(
+            getattr(app_settings, "TINGWU_SR", None)
+            or getattr(app_settings, "TINGWU_SAMPLE_RATE", 16000)
+        )
+        self.lang = getattr(app_settings, "TINGWU_LANG", "cn")
+
+    class _Cb(TingWuRealtimeCallback):
+        def __init__(self):
+            self._inc = 0
+            self.segments: List[dict] = []
+
+        def on_recognize_result(self, result):  # type: ignore[override]
+            transcription = (
+                (result or {})
+                .get("payload", {})
+                .get("output", {})
+                .get("transcription", {})
+            )
+            if transcription.get("sentenceEnd") is True:
+                begin = transcription.get("beginTime") or 0
+                end = transcription.get("endTime") or 0
+                text = transcription.get("text") or ""
+                self._inc += 1
+                self.segments.append(
+                    {
+                        "utt_id": f"tw_{self._inc}",
+                        "text": text,
+                        "speaker": "patient",
+                        "ts": [begin / 1000.0, end / 1000.0],
+                        "conf": 0.95,
+                    }
+                )
+
+        def on_error(self, error):  # type: ignore[override]
+            LOGGER.debug("TingWu realtime error: %s", error)
+
+        def on_close(self):  # type: ignore[override]
+            LOGGER.debug("TingWu realtime closed")
+
+        def on_speech_listen(self, result):  # type: ignore[override]
+            LOGGER.debug("TingWu speech listen: %s", result)
+
+        def on_stopped(self, result):  # type: ignore[override]
+            LOGGER.debug("TingWu realtime stopped: %s", result)
+
+    def _read_bytes(self, path: str) -> bytes:
+        local_path = path.replace("file://", "") if path.startswith("file://") else path
         if not os.path.exists(local_path):
             raise AsrError(f"audio file not found: {local_path}")
         return local_path
@@ -97,15 +151,19 @@ DEFAULT_ASR = StubASR()
 _TINGWU_CLIENT_ASR: Optional[TingwuClientASR] = None
 
 
-def _provider() -> StubASR | TingwuClientASR:
-    global _TINGWU_CLIENT_ASR
-    if _TINGWU_CLIENT_ASR is None:
-        try:
-            _TINGWU_CLIENT_ASR = TingwuClientASR(settings)
-        except Exception as exc:  # pragma: no cover - configuration guard
-            LOGGER.warning("Failed to initialise TingwuClientASR: %s", exc)
-            return DEFAULT_ASR
-    return _TINGWU_CLIENT_ASR
+def _provider() -> StubASR | SDKTingWuASR:
+    global _SDK_TINGWU_ASR
+    provider_name = getattr(settings, "ASR_PROVIDER", "").lower()
+    api_key = getattr(settings, "DASHSCOPE_API_KEY", None)
+    if provider_name == "tingwu" and api_key:
+        if _SDK_TINGWU_ASR is None:
+            try:
+                _SDK_TINGWU_ASR = SDKTingWuASR(settings)
+            except Exception as exc:  # pragma: no cover - configuration guard
+                LOGGER.warning("Failed to initialise SDKTingWuASR: %s", exc)
+                return DEFAULT_ASR
+        return _SDK_TINGWU_ASR
+    return DEFAULT_ASR
 
 
 def transcribe(
