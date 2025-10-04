@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from packages.common.config import settings
-from services.audio.asr_adapter import AsrError, StubASR
+from services.audio.asr_adapter import AsrError, StubASR, TingwuClientASR
 from services.risk.engine import engine as risk_engine
 from services.store.repository import repository
 
@@ -88,7 +88,8 @@ class LangGraphMini:
         self.window_n = self._read_int_env("WINDOW_N", default=8)
         self.window_seconds = self._read_int_env("WINDOW_SECONDS", default=90)
         self.stub_asr = StubASR()
-        if settings.ASR_PROVIDER == "tingwu":
+        provider_name = getattr(settings, "ASR_PROVIDER", "")
+        if provider_name and provider_name.lower() == "tingwu":
             try:
                 from services.audio.asr_adapter import SDKTingWuASR
 

@@ -4,6 +4,7 @@ import logging
 from typing import List, Optional
 
 from packages.common.config import settings
+from services.audio import tingwu_client
 
 
 LOGGER = logging.getLogger(__name__)
@@ -58,12 +59,14 @@ class SDKTingWuASR:
 
 
 DEFAULT_ASR = StubASR()
-_SDK_TINGWU_ASR: Optional[SDKTingWuASR] = None
+_TINGWU_CLIENT_ASR: Optional[TingwuClientASR] = None
 
 
 def _provider() -> StubASR | SDKTingWuASR:
     global _SDK_TINGWU_ASR
-    if settings.ASR_PROVIDER.lower() == "tingwu" and settings.DASHSCOPE_API_KEY:
+    provider_name = getattr(settings, "ASR_PROVIDER", "").lower()
+    api_key = getattr(settings, "DASHSCOPE_API_KEY", None)
+    if provider_name == "tingwu" and api_key:
         if _SDK_TINGWU_ASR is None:
             try:
                 _SDK_TINGWU_ASR = SDKTingWuASR(settings)
@@ -88,12 +91,12 @@ def transcribe(
         return DEFAULT_ASR.transcribe(text=text, audio_ref=audio_ref)
 
 
-TingWuASR = SDKTingWuASR
+TingWuASR = TingwuClientASR
 
 __all__ = [
     "AsrError",
     "StubASR",
-    "SDKTingWuASR",
+    "TingwuClientASR",
     "TingWuASR",
     "transcribe",
 ]
