@@ -4,12 +4,8 @@ import logging
 import os
 from typing import List, Optional
 
-from dashscope.multimodal.tingwu.tingwu_realtime import (
-    TingWuRealtime,
-    TingWuRealtimeCallback,
-)
-
 from packages.common.config import settings
+from services.audio import tingwu_client
 
 
 LOGGER = logging.getLogger(__name__)
@@ -106,8 +102,7 @@ class SDKTingWuASR:
         local_path = path.replace("file://", "") if path.startswith("file://") else path
         if not os.path.exists(local_path):
             raise AsrError(f"audio file not found: {local_path}")
-        with open(local_path, "rb") as handle:
-            return handle.read()
+        return local_path
 
     def transcribe(
         self,
@@ -124,33 +119,36 @@ class SDKTingWuASR:
                     "conf": 0.95,
                 }
             ]
+
         if not audio_ref:
             raise AsrError("audio_ref required")
 
-        audio_bytes = self._read_bytes(audio_ref)
-        callback = self._Cb()
-        try:
-            tingwu = TingWuRealtime(
-                model=self.model,
-                audio_format=self.audio_format,
-                sample_rate=self.sample_rate,
-                app_id=self.app_id,
-                base_address=self.base_address,
-                api_key=self.api_key,
-                callback=callback,
-                max_end_silence=3000,
-            )
-            tingwu.start()
-            tingwu.send_audio_data(audio_bytes)
-            tingwu.stop()
-        except Exception as exc:  # pragma: no cover - network/SDK errors
-            raise AsrError(f"TingWu SDK transcription failed: {exc}") from exc
+        local_path = self._resolve_path(audio_ref)
 
-        return callback.segments
+        try:
+            transcript = tingwu_client.transcribe(local_path)
+        except EnvironmentError as exc:  # pragma: no cover - configuration guard
+            raise AsrError(f"Tingwu client misconfigured: {exc}") from exc
+        except Exception as exc:  # pragma: no cover - network/SDK errors
+            raise AsrError(f"Tingwu client transcription failed: {exc}") from exc
+
+        transcript = transcript.strip()
+        if not transcript:
+            return []
+
+        return [
+            {
+                "utt_id": "tw_1",
+                "text": transcript,
+                "speaker": "patient",
+                "ts": [0, 0],
+                "conf": 0.95,
+            }
+        ]
 
 
 DEFAULT_ASR = StubASR()
-_SDK_TINGWU_ASR: Optional[SDKTingWuASR] = None
+_TINGWU_CLIENT_ASR: Optional[TingwuClientASR] = None
 
 
 def _provider() -> StubASR | SDKTingWuASR:
@@ -182,12 +180,12 @@ def transcribe(
         return DEFAULT_ASR.transcribe(text=text, audio_ref=audio_ref)
 
 
-TingWuASR = SDKTingWuASR
+TingWuASR = TingwuClientASR
 
 __all__ = [
     "AsrError",
     "StubASR",
-    "SDKTingWuASR",
+    "TingwuClientASR",
     "TingWuASR",
     "transcribe",
 ]

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from packages.common.config import settings
-from services.audio.asr_adapter import AsrError, StubASR
+from services.audio.asr_adapter import AsrError, StubASR, TingwuClientASR
 from services.risk.engine import engine as risk_engine
 from services.store.repository import repository
 
