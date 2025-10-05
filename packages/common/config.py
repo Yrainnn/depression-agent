@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     prompt_diagnosis_path: Optional[str] = Field(None, alias="PROMPT_DIAGNOSIS_PATH")
     prompt_mdd_judgment_path: Optional[str] = Field(None, alias="PROMPT_MDD_JUDGMENT_PATH")
     prompt_clarify_cn_path: Optional[str] = Field(None, alias="PROMPT_CLARIFY_CN_PATH")
+    enable_ds_controller: bool = Field(True, alias="ENABLE_DS_CONTROLLER")
     alibaba_cloud_access_key_id: Optional[str] = Field(
         None, alias="ALIBABA_CLOUD_ACCESS_KEY_ID"
     )
@@ -132,6 +133,10 @@ class Settings(BaseSettings):
     @property
     def PROMPT_CLARIFY_CN_PATH(self) -> Optional[str]:
         return self.prompt_clarify_cn_path
+
+    @property
+    def ENABLE_DS_CONTROLLER(self) -> bool:
+        return self.enable_ds_controller
 
     class Config:
         env_file = ".env"

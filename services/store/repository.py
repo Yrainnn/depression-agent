@@ -138,6 +138,43 @@ class ConversationRepository:
             ttl=self.STATE_TTL_SECONDS,
         )
 
+    def get_progress(self, session_id: str) -> Optional[Dict[str, int]]:
+        state = self.load_session_state(session_id)
+        if not state:
+            return None
+
+        index = state.get("index")
+        total = state.get("total")
+        try:
+            index_val = int(index)
+        except (TypeError, ValueError):
+            index_val = 1
+        try:
+            total_val = int(total)
+        except (TypeError, ValueError):
+            total_val = 17
+
+        index_val = max(1, index_val)
+        total_val = max(index_val, total_val)
+        return {"index": index_val, "total": total_val}
+
+    def set_progress(self, session_id: str, progress: Dict[str, Any]) -> None:
+        state = self.load_session_state(session_id) or {}
+        if isinstance(progress, dict):
+            index = progress.get("index")
+            total = progress.get("total")
+            if index is not None:
+                try:
+                    state["index"] = max(1, int(index))
+                except (TypeError, ValueError):
+                    state.setdefault("index", 1)
+            if total is not None:
+                try:
+                    state["total"] = max(state.get("index", 1), int(total))
+                except (TypeError, ValueError):
+                    state.setdefault("total", state.get("index", 1))
+        self.save_session_state(session_id, state)
+
     def set_last_clarify_need(
         self, session_id: str, item_id: int, clarify_need: str
     ) -> None:
@@ -147,7 +184,23 @@ class ConversationRepository:
             targets = {}
         targets[str(item_id)] = clarify_need
         state["clarify_targets"] = targets
+        state["last_clarify"] = {"item_id": item_id, "need": clarify_need}
         self.save_session_state(session_id, state)
+
+    def get_last_clarify_need(self, session_id: str) -> Optional[Dict[str, Any]]:
+        state = self.load_session_state(session_id)
+        if not state:
+            return None
+        last = state.get("last_clarify")
+        if isinstance(last, dict) and "item_id" in last:
+            return last
+        return None
+
+    def clear_last_clarify_need(self, session_id: str) -> None:
+        state = self.load_session_state(session_id) or {}
+        if "last_clarify" in state:
+            state.pop("last_clarify", None)
+            self.save_session_state(session_id, state)
 
     def mark_finished(self, session_id: str) -> None:
         state = self.load_session_state(session_id) or {}

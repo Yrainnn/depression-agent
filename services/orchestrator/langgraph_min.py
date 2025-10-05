@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from packages.common.config import settings
 from services.audio.asr_adapter import AsrError, StubASR, TingwuClientASR
-from services.llm.json_client import DeepSeekJSONClient, HAMDResult
+from services.llm.json_client import ControllerDecision, DeepSeekJSONClient, HAMDResult
 from services.llm.prompts import (
     get_prompt_hamd17,
     get_prompt_diagnosis,
@@ -190,8 +190,8 @@ class LangGraphMini:
         dialogue_payload = self._build_dialogue_payload(sid)
         current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
-        decision = None
-        if self.deepseek.enabled():
+        decision: Optional[ControllerDecision] = None
+        if settings.ENABLE_DS_CONTROLLER and self.deepseek.enabled():
             try:
                 decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
             except Exception as exc:  # pragma: no cover - runtime guard
@@ -228,9 +228,31 @@ class LangGraphMini:
         if state.analysis:
             extra["analysis"] = state.analysis
 
-        next_utt = decision.next_utterance or ""
+        next_utt = decision.next_utterance or "请继续描述。"
+        forced_target: Optional[int] = None
+        try:
+            last_clarify = self.repo.get_last_clarify_need(sid)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to load last clarify target for %s", sid)
+            last_clarify = None
 
-        if decision.action == "clarify":
+        if decision.action == "clarify" and last_clarify and (user_text or prepared_segments):
+            LOGGER.debug("Clarify override triggered for %s after user response", sid)
+            try:
+                self.repo.clear_last_clarify_need(sid)
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to clear clarify target for %s", sid)
+            forced_target = get_next_item(item_id)
+            if forced_target == -1:
+                decision_action = "finish"
+                next_utt = COMPLETION_TEXT
+            else:
+                decision_action = "ask"
+                next_utt = pick_primary(forced_target)
+        else:
+            decision_action = decision.action
+
+        if decision_action == "clarify":
             if decision.clarify_target:
                 try:
                     self.repo.set_last_clarify_need(
@@ -257,9 +279,16 @@ class LangGraphMini:
                 record=False,
             )
 
-        if decision.action == "ask":
-            self._advance_to(sid, decision.current_item_id, state)
+        if decision_action == "ask":
+            target_item = forced_target or decision.current_item_id
+            if target_item in (None, 0):
+                target_item = get_next_item(item_id)
+            self._advance_to(sid, target_item or item_id, state)
             state.clarify = 0
+            try:
+                self.repo.clear_last_clarify_need(sid)
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to clear clarify target for %s", sid)
             self._append_turn(
                 sid,
                 state,
@@ -283,6 +312,10 @@ class LangGraphMini:
             self.repo.mark_finished(sid)
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to mark session %s finished", sid)
+        try:
+            self.repo.clear_last_clarify_need(sid)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to clear clarify target for %s", sid)
         completion_text = next_utt or COMPLETION_TEXT
         self._append_turn(
             sid,
