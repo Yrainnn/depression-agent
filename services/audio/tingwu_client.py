@@ -22,7 +22,7 @@ from packages.common.config import settings
 nls.enableTrace(False)
 
 REGION = settings.TINGWU_REGION or "cn-beijing"
-DOMAIN = "tingwu.cn-beijing.aliyuncs.com"
+DOMAIN = f"tingwu.{REGION}.aliyuncs.com"
 SAMPLE_RATE = settings.TINGWU_SAMPLE_RATE or 16000
 
 
@@ -52,9 +52,9 @@ def _create_task():
     body = {
         "AppKey": appkey,
         "Input": {
-            "Format": "pcm",
+            "Format": settings.TINGWU_FORMAT or "pcm",
             "SampleRate": SAMPLE_RATE,
-            "SourceLanguage": "cn",
+            "SourceLanguage": settings.TINGWU_LANG or "cn",
         },
         "Parameters": {"Transcription": {"OutputLevel": 2}},
     }

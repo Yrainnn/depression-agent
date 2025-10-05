@@ -23,13 +23,24 @@ class Settings(BaseSettings):
     alibaba_cloud_access_key_secret: Optional[str] = Field(
         None, alias="ALIBABA_CLOUD_ACCESS_KEY_SECRET"
     )
+    tingwu_appkey: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TINGWU_APPKEY")
+        or os.getenv("ALIBABA_TINGWU_APPKEY"),
+        alias="TINGWU_APPKEY",
+    )
     alibaba_tingwu_appkey: Optional[str] = Field(
         default_factory=lambda: os.getenv("ALIBABA_TINGWU_APPKEY"),
         alias="ALIBABA_TINGWU_APPKEY",
     )
+    tingwu_ak_id: Optional[str] = Field(None, alias="TINGWU_AK_ID")
+    tingwu_ak_secret: Optional[str] = Field(None, alias="TINGWU_AK_SECRET")
     tingwu_region: str = Field(
         default_factory=lambda: os.getenv("TINGWU_REGION", "cn-beijing"),
         alias="TINGWU_REGION",
+    )
+    tingwu_base: str = Field("https://tingwu.aliyuncs.com", alias="TINGWU_BASE")
+    tingwu_ws_base: str = Field(
+        "wss://tingwu.aliyuncs.com/ws/v1", alias="TINGWU_WS_BASE"
     )
     tingwu_sample_rate: int = Field(
         default_factory=lambda: int(
@@ -39,9 +50,21 @@ class Settings(BaseSettings):
         ),
         alias="TINGWU_SAMPLE_RATE",
     )
+    tingwu_format: str = Field(
+        default_factory=lambda: os.getenv("TINGWU_FORMAT", "pcm"),
+        alias="TINGWU_FORMAT",
+    )
+    tingwu_lang: str = Field(
+        default_factory=lambda: os.getenv("TINGWU_LANG", "cn"),
+        alias="TINGWU_LANG",
+    )
 
     # ------------------------------------------------------------------
     # Compatibility accessors (new uppercase field names exposed for callers)
+    @property
+    def TINGWU_APPKEY(self) -> Optional[str]:
+        return self.tingwu_appkey or self.alibaba_tingwu_appkey
+
     @property
     def ALIBABA_TINGWU_APPKEY(self) -> Optional[str]:
         return self.alibaba_tingwu_appkey
@@ -51,8 +74,20 @@ class Settings(BaseSettings):
         return self.tingwu_region
 
     @property
+    def TINGWU_FORMAT(self) -> str:
+        return self.tingwu_format
+
+    @property
+    def TINGWU_SR(self) -> int:
+        return self.tingwu_sample_rate
+
+    @property
     def TINGWU_SAMPLE_RATE(self) -> int:
         return self.tingwu_sample_rate
+
+    @property
+    def TINGWU_LANG(self) -> str:
+        return self.tingwu_lang
 
     class Config:
         env_file = ".env"

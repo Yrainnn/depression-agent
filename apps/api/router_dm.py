@@ -198,13 +198,11 @@ async def debug_asr() -> Dict[str, Any]:
     await _rate_limit()
 
     return {
+        "provider": "tingwu_client",
         "region": settings.TINGWU_REGION,
         "sample_rate": settings.TINGWU_SAMPLE_RATE,
-        "appkey_present": bool(settings.ALIBABA_TINGWU_APPKEY),
-        "access_key_configured": bool(
-            settings.ALIBABA_CLOUD_ACCESS_KEY_ID
-            and settings.ALIBABA_CLOUD_ACCESS_KEY_SECRET
-        ),
+        "format": settings.TINGWU_FORMAT,
+        "appkey_present": bool(settings.TINGWU_APPKEY),
     }
 
 

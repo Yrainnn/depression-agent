@@ -88,18 +88,13 @@ class LangGraphMini:
         self.window_n = self._read_int_env("WINDOW_N", default=8)
         self.window_seconds = self._read_int_env("WINDOW_SECONDS", default=90)
         self.stub_asr = StubASR()
-        provider_name = getattr(settings, "ASR_PROVIDER", "")
-        if provider_name and provider_name.lower() == "tingwu":
-            try:
-                from services.audio.asr_adapter import SDKTingWuASR
-
-                self.asr = SDKTingWuASR(settings)
-            except Exception as exc:  # pragma: no cover - configuration guard
-                LOGGER.warning(
-                    "Failed to initialise SDKTingWuASR, using stub instead: %s", exc
-                )
-                self.asr = self.stub_asr
-        else:
+        try:
+            self.asr = TingwuClientASR(settings)
+        except AsrError as exc:  # pragma: no cover - configuration guard
+            LOGGER.warning(
+                "Failed to initialise TingWu client ASR, using stub instead: %s",
+                exc,
+            )
             self.asr = self.stub_asr
 
     # ------------------------------------------------------------------

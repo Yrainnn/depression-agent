@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import List, Optional
 
 from packages.common.config import settings
-from services.audio import tingwu_client
+from services.audio.tingwu_client import transcribe as tingwu_playback_transcribe
 
 
 LOGGER = logging.getLogger(__name__)
@@ -37,44 +38,97 @@ class StubASR:
         return []
 
 
-class SDKTingWuASR:
-    """Placeholder for the former DashScope TingWu integration."""
+class TingwuClientASR:
+    """Adapter wrapping the internal TingWu playback client."""
 
-    def __init__(self, app_settings):  # pragma: no cover - configuration guard
-        self.model = app_settings.TINGWU_MODEL or "paraformer-realtime-v2"
-        self.api_key = app_settings.DASHSCOPE_API_KEY
-        self.app_id = app_settings.TINGWU_APP_ID
-        raise AsrError(
-            "DashScope TingWu SDK support has been removed from this deployment"
-        )
+    def __init__(self, app_settings):
+        self._settings = app_settings
+        self._validate_environment()
+
+    def _validate_environment(self) -> None:
+        missing: List[str] = []
+        if not self._settings.ALIBABA_CLOUD_ACCESS_KEY_ID:
+            missing.append("ALIBABA_CLOUD_ACCESS_KEY_ID")
+        if not self._settings.ALIBABA_CLOUD_ACCESS_KEY_SECRET:
+            missing.append("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+        if not (
+            self._settings.TINGWU_APPKEY
+            or self._settings.ALIBABA_TINGWU_APPKEY
+        ):
+            missing.append("ALIBABA_TINGWU_APPKEY")
+
+        if missing:
+            raise AsrError(
+                "Missing TingWu configuration: " + ", ".join(sorted(set(missing)))
+            )
+
+    @staticmethod
+    def _resolve_audio_path(audio_ref: str) -> Path:
+        local_path = audio_ref
+        if audio_ref.startswith("file://"):
+            local_path = audio_ref.replace("file://", "", 1)
+        path = Path(local_path)
+        if not path.exists():
+            raise AsrError(f"audio file not found: {path}")
+        if not path.is_file():
+            raise AsrError(f"audio path is not a file: {path}")
+        return path
 
     def transcribe(
         self,
         text: Optional[str] = None,
         audio_ref: Optional[str] = None,
-    ) -> List[dict]:  # pragma: no cover - configuration guard
-        raise AsrError(
-            "DashScope TingWu SDK support has been removed from this deployment"
-        )
+    ) -> List[dict]:
+        if text:
+            return DEFAULT_ASR.transcribe(text=text)
+        if not audio_ref:
+            raise AsrError("audio_ref required for TingWu transcription")
+
+        path = self._resolve_audio_path(audio_ref)
+        try:
+            transcript = tingwu_playback_transcribe(str(path))
+        except EnvironmentError as exc:
+            raise AsrError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - network/SDK errors
+            raise AsrError(f"TingWu transcription failed: {exc}") from exc
+
+        transcript = (transcript or "").strip()
+        if not transcript:
+            LOGGER.debug("TingWu transcription returned empty result for %s", path)
+            return []
+
+        return [
+            {
+                "utt_id": "tw_1",
+                "text": transcript,
+                "speaker": "patient",
+                "ts": [0, 0],
+                "conf": 0.95,
+            }
+        ]
 
 
 DEFAULT_ASR = StubASR()
-_TINGWU_CLIENT_ASR: Optional[TingwuClientASR] = None
+_TINGWU_ASR: Optional[TingwuClientASR] = None
+_TINGWU_INIT_FAILED = False
 
 
-def _provider() -> StubASR | SDKTingWuASR:
-    global _SDK_TINGWU_ASR
-    provider_name = getattr(settings, "ASR_PROVIDER", "").lower()
-    api_key = getattr(settings, "DASHSCOPE_API_KEY", None)
-    if provider_name == "tingwu" and api_key:
-        if _SDK_TINGWU_ASR is None:
-            try:
-                _SDK_TINGWU_ASR = SDKTingWuASR(settings)
-            except Exception as exc:  # pragma: no cover - configuration guard
-                LOGGER.warning("Failed to initialise SDKTingWuASR: %s", exc)
-                return DEFAULT_ASR
-        return _SDK_TINGWU_ASR
-    return DEFAULT_ASR
+def _provider() -> StubASR | TingwuClientASR:
+    global _TINGWU_ASR, _TINGWU_INIT_FAILED
+    if _TINGWU_ASR is not None:
+        return _TINGWU_ASR
+    if _TINGWU_INIT_FAILED:
+        return DEFAULT_ASR
+    try:
+        _TINGWU_ASR = TingwuClientASR(settings)
+        return _TINGWU_ASR
+    except AsrError as exc:
+        LOGGER.warning(
+            "Failed to initialise TingWu client ASR, falling back to stub: %s",
+            exc,
+        )
+        _TINGWU_INIT_FAILED = True
+        return DEFAULT_ASR
 
 
 def transcribe(
