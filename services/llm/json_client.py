@@ -130,6 +130,32 @@ class DeepSeekJSONClient:
             return HAMDResult.model_validate(parsed)
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analyze failed: %s", exc)
+            latest_user_text = ""
+            for entry in reversed(dialogue_json):
+                if entry.get("role") == "user":
+                    latest_user_text = entry.get("text") or ""
+                    break
+
+            lowered = (latest_user_text or "").lower()
+            needs_frequency = not any(keyword in lowered for keyword in ("次", "天", "每周"))
+            needs_duration = not any(
+                keyword in lowered for keyword in ("整天", "小时", "多久")
+            )
+            needs_severity = not any(
+                keyword in lowered for keyword in ("严重", "很难", "影响")
+            )
+            needs_negation = any(keyword in lowered for keyword in ("没有", "不"))
+
+            clarify_need: Optional[str] = None
+            if needs_frequency:
+                clarify_need = "频次"
+            elif needs_duration:
+                clarify_need = "持续时间"
+            elif needs_severity:
+                clarify_need = "严重程度"
+            elif needs_negation:
+                clarify_need = "是否否定"
+
             mock = {
                 "items": [
                     {
@@ -140,7 +166,7 @@ class DeepSeekJSONClient:
                         "score": 0,
                         "score_type": "类型4",
                         "score_reason": "信息不足",
-                        "clarify_need": "频次",
+                        "clarify_need": clarify_need,
                     }
                 ]
                 + [
