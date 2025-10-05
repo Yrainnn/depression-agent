@@ -6,9 +6,12 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Gauge, gen
 
 from apps.api.router_dm import router as dm_router
 from services.store.repository import repository
+from apps.api.router_asr_tingwu import router as tingwu_asr_router
+
 
 app = FastAPI(title="Depression Agent API", version="0.1.0")
 app.include_router(dm_router)
+app.include_router(tingwu_asr_router) 
 
 _registry = CollectorRegistry()
 _health_gauge = Gauge("depression_agent_health", "Health status of the API", registry=_registry)
