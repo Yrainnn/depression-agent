@@ -10,6 +10,7 @@ services/audio/tingwu_client.py
 - 停止任务并返回最终文本
 """
 import json
+import sys
 import threading
 import time
 
@@ -89,13 +90,26 @@ class TingwuRealtimeClient:
 
     # --- 回调 ---
     def on_start(self, message, *args):
-        pass
+        print("[tingwu] streaming session started", flush=True)
 
     def on_sentence_begin(self, message, *args):
-        pass
+        payload = {}
+        try:
+            payload = json.loads(message).get("payload", {})
+        except Exception:
+            return
+        text = payload.get("result") or payload.get("text")
+        if text:
+            print(f"[tingwu] ⇢ sentence begin: {text}", flush=True)
 
     def on_result_changed(self, message, *args):
-        pass
+        try:
+            payload = json.loads(message).get("payload", {})
+        except Exception:
+            return
+        text = payload.get("result") or payload.get("text")
+        if text:
+            print(f"[tingwu] … partial: {text}", flush=True)
 
     def on_sentence_end(self, message, *args):
         try:
@@ -103,17 +117,18 @@ class TingwuRealtimeClient:
             text = payload.get("result", "")
             if text:
                 self.result_text += text + " "
+                print(f"[tingwu] ✓ final: {text}", flush=True)
         except Exception:
             pass
 
     def on_completed(self, message, *args):
-        pass
+        print("[tingwu] streaming session completed", flush=True)
 
     def on_error(self, message, *args):
-        pass
+        print(f"[tingwu] ! error: {message}", file=sys.stderr, flush=True)
 
     def on_close(self, *args):
-        pass
+        print("[tingwu] connection closed", flush=True)
 
     def _run(self):
         rm = nls.NlsRealtimeMeeting(
@@ -131,8 +146,11 @@ class TingwuRealtimeClient:
         # 推流音频：640字节一包（10ms @16k/mono/s16le）；若源是 wav，建议先转 PCM。
         with open(self.audio_file, "rb") as f:
             data = f.read()
-        for i in range(0, len(data), 640):
-            rm.send_audio(data[i : i + 640])
+        total = max((len(data) + 639) // 640, 1)
+        for idx in range(0, len(data), 640):
+            chunk_no = idx // 640 + 1
+            rm.send_audio(data[idx : idx + 640])
+            print(f"[tingwu] ↳ streamed chunk {chunk_no}/{total}", flush=True)
             time.sleep(0.01)
         rm.stop()
         time.sleep(1.5)
