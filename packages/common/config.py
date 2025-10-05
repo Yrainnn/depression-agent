@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Compatibility accessors (new uppercase field names exposed for callers)
     @property
+    def ALIBABA_CLOUD_ACCESS_KEY_ID(self) -> Optional[str]:
+        return self.alibaba_cloud_access_key_id
+
+    @property
+    def ALIBABA_CLOUD_ACCESS_KEY_SECRET(self) -> Optional[str]:
+        return self.alibaba_cloud_access_key_secret
+        
+    @property
     def TINGWU_APPKEY(self) -> Optional[str]:
         return self.tingwu_appkey or self.alibaba_tingwu_appkey
 
