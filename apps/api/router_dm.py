@@ -5,6 +5,11 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Literal
+from uuid import uuid4
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -33,14 +38,12 @@ def _validate_sid(sid: str) -> None:
         raise HTTPException(status_code=400, detail="invalid session id")
 
 
-class StepRequest(BaseModel):
-    sid: str = Field(..., description="Conversation session identifier")
-    text: Optional[str] = Field(None, description="Patient utterance text")
-    audio_ref: Optional[str] = Field(None, description="Audio reference (path or URL)")
-
-
-    class Config:
-        allow_population_by_field_name = True
+class DMStepPayload(BaseModel):
+    sid: str
+    role: Literal["user", "assistant"] = "user"
+    text: Optional[str] = None
+    audio_ref: Optional[str] = None
+    scale: Optional[str] = "HAMD17"
 
 
 class StepResponse(BaseModel):
@@ -56,23 +59,17 @@ class StepResponse(BaseModel):
 
 
 @router.post("/dm/step", response_model=StepResponse)
-async def dm_step(payload: StepRequest) -> StepResponse:
-    if not payload.text and not payload.audio_ref:
-        state = repository.load_session_state(payload.sid)
-        transcripts = repository.load_transcripts(payload.sid)
-        if not state and not transcripts:
-            result = orchestrator.ask(payload.sid)
-            return StepResponse(**result)
-        raise HTTPException(status_code=400, detail="text or audio_ref must be provided")
-
+async def dm_step(payload: DMStepPayload) -> StepResponse:
     audio_ref = payload.audio_ref
     if audio_ref and audio_ref.startswith("file://"):
         audio_ref = audio_ref[7:]
 
     result = orchestrator.step(
-        payload.sid,
+        sid=payload.sid,
+        role=payload.role,
         text=payload.text,
         audio_ref=audio_ref,
+        scale=payload.scale or "HAMD17",
     )
     return StepResponse(**result)
 

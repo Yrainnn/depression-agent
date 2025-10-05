@@ -92,10 +92,10 @@ class LangGraphMini:
     def step(
         self,
         sid: str,
-        role: Optional[str] = None,
+        role: str,
         text: Optional[str] = None,
         audio_ref: Optional[str] = None,
-        segments: Optional[List[Dict[str, object]]] = None,
+        scale: str = "HAMD17",
     ) -> Dict[str, object]:
         state = self._load_state(sid)
         LOGGER.debug("Loaded state for %s: %s", sid, state)
@@ -103,49 +103,37 @@ class LangGraphMini:
         if state.completed:
             return self._complete_payload(state, COMPLETION_TEXT)
 
-        if not text and not audio_ref and not segments:
-            transcripts = self.repo.get_transcripts(sid)
-            if not transcripts and state.index == get_first_item():
-                question = pick_primary(self._current_item_id(state))
-                return self._make_response(sid, state, question, transcripts=[])
-            return self._make_response(
-                sid,
-                state,
-                MISSING_INPUT_PROMPT,
-                transcripts=transcripts,
-            )
+        if not text and not audio_ref:
+            item = get_first_item()
+            question = pick_primary(item)
+            response = self._make_response(sid, state, question, transcripts=[])
+            response.setdefault("risk", None)
+            response.setdefault("analysis", None)
+            return response
 
         raw_segments: List[Dict[str, object]] = []
-        if segments is not None:
-            raw_segments.extend(segments)
-        else:
-            text_segments: List[Dict[str, object]] = []
-            if text:
-                text_segments = self.stub_asr.transcribe(text=text)
+        text_segments: List[Dict[str, object]] = []
+        if text:
+            text_segments = self.stub_asr.transcribe(text=text)
 
-            audio_segments: List[Dict[str, object]] = []
-            if audio_ref:
-                try:
-                    audio_segments = self.asr.transcribe(text=None, audio_ref=audio_ref)
-                except AsrError as exc:
-                    LOGGER.warning("ASR audio transcription failed for %s: %s", sid, exc)
-                    if text_segments:
-                        raw_segments.extend(text_segments)
-                        text_segments = []
-                    else:
-                        return self._make_response(
-                            sid,
-                            state,
-                            MISSING_INPUT_PROMPT,
-                            transcripts=self.repo.get_transcripts(sid),
-                        )
-                else:
-                    raw_segments.extend(text_segments)
-                    raw_segments.extend(audio_segments)
-                    text_segments = []
+        audio_segments: List[Dict[str, object]] = []
+        if audio_ref:
+            try:
+                audio_segments = self.asr.transcribe(text=None, audio_ref=audio_ref)
+            except AsrError as exc:
+                LOGGER.warning("ASR audio transcription failed for %s: %s", sid, exc)
+                if not text_segments:
+                    return self._make_response(
+                        sid,
+                        state,
+                        MISSING_INPUT_PROMPT,
+                        transcripts=self.repo.get_transcripts(sid),
+                    )
 
-            if text_segments:
-                raw_segments.extend(text_segments)
+        if text_segments:
+            raw_segments.extend(text_segments)
+        if audio_segments:
+            raw_segments.extend(audio_segments)
 
         prepared_segments = self._prepare_segments(state, raw_segments)
         if prepared_segments:
@@ -236,6 +224,8 @@ class LangGraphMini:
         }
         if previews:
             payload["segments_previews"] = previews
+        payload.setdefault("risk", None)
+        payload.setdefault("analysis", None)
         if extra:
             payload.update(extra)
         return payload
