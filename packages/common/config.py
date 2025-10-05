@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     redis_password: Optional[str] = Field(None, alias="REDIS_PASSWORD")
     deepseek_api_base: Optional[str] = Field(None, alias="DEEPSEEK_API_BASE")
     deepseek_api_key: Optional[str] = Field(None, alias="DEEPSEEK_API_KEY")
+    prompt_hamd17_path: Optional[str] = Field(None, alias="PROMPT_HAMD17_PATH")
+    prompt_diagnosis_path: Optional[str] = Field(None, alias="PROMPT_DIAGNOSIS_PATH")
+    prompt_mdd_judgment_path: Optional[str] = Field(None, alias="PROMPT_MDD_JUDGMENT_PATH")
+    prompt_clarify_cn_path: Optional[str] = Field(None, alias="PROMPT_CLARIFY_CN_PATH")
     alibaba_cloud_access_key_id: Optional[str] = Field(
         None, alias="ALIBABA_CLOUD_ACCESS_KEY_ID"
     )
@@ -104,6 +108,30 @@ class Settings(BaseSettings):
     @property
     def ALIBABA_CLOUD_ACCESS_KEY_SECRET(self) -> Optional[str]:
         return self.alibaba_cloud_access_key_secret
+
+    @property
+    def DEEPSEEK_API_BASE(self) -> Optional[str]:
+        return self.deepseek_api_base
+
+    @property
+    def DEEPSEEK_API_KEY(self) -> Optional[str]:
+        return self.deepseek_api_key
+
+    @property
+    def PROMPT_HAMD17_PATH(self) -> Optional[str]:
+        return self.prompt_hamd17_path
+
+    @property
+    def PROMPT_DIAGNOSIS_PATH(self) -> Optional[str]:
+        return self.prompt_diagnosis_path
+
+    @property
+    def PROMPT_MDD_JUDGMENT_PATH(self) -> Optional[str]:
+        return self.prompt_mdd_judgment_path
+
+    @property
+    def PROMPT_CLARIFY_CN_PATH(self) -> Optional[str]:
+        return self.prompt_clarify_cn_path
 
     class Config:
         env_file = ".env"

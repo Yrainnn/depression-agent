@@ -1,186 +1,194 @@
-import logging
-import re
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
-import requests
-from pydantic import BaseModel, ValidationError, root_validator
+import json
+import logging
+import os
+from typing import List, Optional
+
+import httpx
+from pydantic import BaseModel, Field
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 from packages.common.config import settings
+from services.llm.prompts import (
+    get_prompt_clarify_cn,
+    get_prompt_diagnosis,
+    get_prompt_hamd17,
+    get_prompt_mdd_judgment,
+)
 
 LOGGER = logging.getLogger(__name__)
 
-VAGUE_PHRASES = [
-    "还好",
-    "一般",
-    "差不多",
-    "说不清",
-    "不好说",
-    "看情况",
-    "可能吧",
-    "偶尔吧",
-    "有点吧",
-    "还行",
-    "凑合",
-]
 
-
-class SymptomScore(BaseModel):
-    name: str
+class HAMDItem(BaseModel):
+    item_id: int
+    symptom_summary: str
+    dialogue_evidence: str
+    evidence_refs: List[str] = Field(default_factory=list)
     score: int
-    evidence_refs: List[str]
+    score_type: str
+    score_reason: str
+    clarify_need: Optional[str] = None
 
 
-class AnalysisResult(BaseModel):
-    summary: str
-    scores: List[SymptomScore]
-    follow_up_questions: List[str]
-
-    @root_validator(pre=True)
-    def ensure_defaults(cls, values: Dict[str, Any]) -> Dict[str, Any]:  # noqa: N805
-        values.setdefault("scores", [])
-        values.setdefault("follow_up_questions", [])
-        return values
+class HAMDTotal(BaseModel):
+    得分序列: str
+    pre_correction_total: int
+    corrected_total: int
+    correction_basis: str
 
 
-@dataclass
-class LLMJSONClient:
-    base_url: Optional[str] = settings.deepseek_api_base
-    api_key: Optional[str] = settings.deepseek_api_key
-    model: str = "gpt-4o-mini"
-    max_retries: int = 2
+class HAMDResult(BaseModel):
+    items: List[HAMDItem]
+    total_score: HAMDTotal
 
-    keyword_map: Dict[str, Dict[str, Any]] = None  # type: ignore[assignment]
 
-    def __post_init__(self) -> None:
-        if self.keyword_map is None:
-            self.keyword_map = {
-                "早醒": {"name": "sleep_disturbance", "score": 2},
-                "没兴趣": {"name": "anhedonia", "score": 2},
-                "情绪低落": {"name": "low_mood", "score": 3},
-                "焦虑": {"name": "anxiety", "score": 2},
-            }
+class DeepSeekJSONClient:
+    """Minimal OpenAI-compatible client targeting DeepSeek JSON responses."""
 
-    # ------------------------------------------------------------------
-    def analyze_transcript(self, segments: List[Dict[str, Any]]) -> AnalysisResult:
-        """Run structured LLM analysis for the given transcript segments."""
+    def __init__(
+        self,
+        base: Optional[str] = None,
+        key: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> None:
+        self.base = base or settings.deepseek_api_base
+        self.key = key or settings.deepseek_api_key
+        self.model = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-        if self.base_url and self.api_key:
-            try:
-                return self._call_remote_llm(segments)
-            except Exception as exc:  # pragma: no cover - runtime guard
-                LOGGER.warning("Remote LLM failed (%s), falling back to mock", exc)
+    def enabled(self) -> bool:
+        return bool(self.base and self.key)
 
-        return self._mock_analysis(segments)
+    @retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
+    def _post_chat(
+        self,
+        *,
+        messages: List[dict],
+        response_format: Optional[dict] = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+        timeout: float = 20.0,
+    ) -> str:
+        if not self.enabled():  # pragma: no cover - guard rail
+            raise RuntimeError("DeepSeek client not configured")
 
-    # ------------------------------------------------------------------
-    def _call_remote_llm(self, segments: List[Dict[str, Any]]) -> AnalysisResult:
+        url = self.base.rstrip("/") + "/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
         }
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a clinician assistant returning JSON only.",
-            },
-            {
-                "role": "user",
-                "content": (
-                    "请阅读患者访谈文本，评估相关抑郁症状的量表分项，"
-                    "并返回JSON：{summary: str, scores: [{name, score, evidence_refs: [utt_id]}],"
-                    "follow_up_questions: [str]}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": "\n".join(
-                    f"{seg.get('utt_id')}: {seg.get('text')}" for seg in segments
-                ),
-            },
-        ]
-        payload = {
+        payload: dict = {
             "model": self.model,
             "messages": messages,
-            "response_format": {"type": "json_object"},
+            "temperature": temperature,
+            "max_tokens": max_tokens,
         }
+        if response_format:
+            payload["response_format"] = response_format
 
-        last_error: Optional[Exception] = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                response = requests.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=30,
-                )
-                response.raise_for_status()
-                data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                parsed = AnalysisResult.parse_raw(content)
-                return parsed
-            except (requests.RequestException, KeyError, ValidationError, ValueError) as exc:
-                last_error = exc
-                LOGGER.warning("LLM attempt %s failed: %s", attempt, exc)
-        raise RuntimeError(f"LLM call failed: {last_error}")
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
 
-    # ------------------------------------------------------------------
-    def _mock_analysis(self, segments: List[Dict[str, Any]]) -> Any:
-        last_patient_text = ""
-        for segment in reversed(segments):
-            speaker = str(segment.get("speaker", "patient"))
-            if speaker and speaker != "patient":
-                continue
-            candidate = str(segment.get("text", "")).strip()
-            if candidate:
-                last_patient_text = candidate
-                break
-
-        if last_patient_text and self._is_vague(last_patient_text):
-            return {
-                "intent": "score_item",
-                "schema_id": "PHQ9.v1",
-                "item_tag": None,
-                "per_item_scores": [],
-                "evidence_spans": [],
-                "opinion": {"summary": "", "rationale": ""},
-                "total_score": 0,
-                "clarify_request": "请具体点：每周大概几天？",
+    def analyze(
+        self,
+        dialogue_json: List[dict],
+        system_prompt: Optional[str] = None,
+    ) -> HAMDResult:
+        prompt = system_prompt or get_prompt_hamd17()
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(dialogue_json, ensure_ascii=False)},
+        ]
+        try:
+            content = self._post_chat(
+                messages=messages,
+                response_format={"type": "json_object"},
+            )
+            parsed = json.loads(content)
+            return HAMDResult.model_validate(parsed)
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.warning("DeepSeek analyze failed: %s", exc)
+            mock = {
+                "items": [
+                    {
+                        "item_id": 1,
+                        "symptom_summary": "信息有限",
+                        "dialogue_evidence": "信息缺失",
+                        "evidence_refs": [],
+                        "score": 0,
+                        "score_type": "类型4",
+                        "score_reason": "信息不足",
+                        "clarify_need": "频次",
+                    }
+                ]
+                + [
+                    {
+                        "item_id": idx,
+                        "symptom_summary": "未提及",
+                        "dialogue_evidence": "未提及",
+                        "evidence_refs": [],
+                        "score": 0,
+                        "score_type": "类型3",
+                        "score_reason": "未涉及",
+                        "clarify_need": None,
+                    }
+                    for idx in range(2, 18)
+                ],
+                "total_score": {
+                    "得分序列": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+                    "pre_correction_total": 0,
+                    "corrected_total": 0,
+                    "correction_basis": "类型4条目数量0，平均分0.00，修正总分=A+0.00×0≈0",
+                },
             }
+            return HAMDResult.model_validate(mock)
 
-        text = "\n".join(seg.get("text", "") for seg in segments)
-        scores: List[SymptomScore] = []
-        follow_up_questions: List[str] = []
-
-        for keyword, meta in self.keyword_map.items():
-            evidence_refs = [seg.get("utt_id", "") for seg in segments if keyword in seg.get("text", "")]
-            if evidence_refs:
-                scores.append(
-                    SymptomScore(
-                        name=meta["name"],
-                        score=meta["score"],
-                        evidence_refs=evidence_refs,
-                    )
-                )
-
-        if "睡" in text and not any(score.name == "sleep_disturbance" for score in scores):
-            follow_up_questions.append("最近的睡眠情况如何？")
-        if "食欲" not in text:
-            follow_up_questions.append("最近食欲有变化吗？")
-
-        summary = "患者分享了情绪与生活状态，建议继续跟进。"
-        return AnalysisResult(summary=summary, scores=scores, follow_up_questions=follow_up_questions)
-
-    @staticmethod
-    def _is_vague(text: str) -> bool:
-        if not text:
-            return False
-        normalized = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE).lower()
-        for phrase in VAGUE_PHRASES:
-            phrase_norm = re.sub(r"[\s\W]+", "", phrase, flags=re.UNICODE).lower()
-            if phrase_norm and phrase_norm in normalized:
-                return True
-        return False
+    def gen_clarify_question(
+        self,
+        item_id: int,
+        item_name: str,
+        clarify_need: str,
+        evidence_text: str,
+    ) -> Optional[str]:
+        prompt = get_prompt_clarify_cn().format(
+            item_id=item_id,
+            item_name=item_name,
+            clarify_need=clarify_need or "（未标注）",
+            evidence_text=(evidence_text or "（无明确证据片段）")[:200],
+        )
+        try:
+            content = self._post_chat(
+                messages=[{"role": "user", "content": prompt}],
+                response_format=None,
+                max_tokens=64,
+                temperature=0.2,
+                timeout=15,
+            )
+            text = (content or "").strip()
+            for end in ["？", "。", "!", "！", "?"]:
+                if end in text:
+                    text = text.split(end)[0] + end
+                    break
+            return text[:30] if text else None
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.warning("DeepSeek clarify generation failed: %s", exc)
+            return None
 
 
-client = LLMJSONClient()
+# Convenience singleton -------------------------------------------------
+client = DeepSeekJSONClient()
+
+__all__ = [
+    "DeepSeekJSONClient",
+    "HAMDItem",
+    "HAMDResult",
+    "HAMDTotal",
+    "client",
+    "get_prompt_hamd17",
+    "get_prompt_diagnosis",
+    "get_prompt_mdd_judgment",
+    "get_prompt_clarify_cn",
+]

@@ -87,6 +87,14 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 - **CoSyVoice TTS**：在 `services/tts/tts_adapter.py` 中调用真实语音合成接口，返回或缓存生成的语音资源。
 - **真实 LLM**：在 `.env` 配置 `DEEPSEEK_API_BASE`（可选）、`DEEPSEEK_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。
 
+## DeepSeek JSON 评分与澄清问
+
+- 配置 `DEEPSEEK_API_BASE`、`DEEPSEEK_API_KEY` 后，系统会在问卷过程中累计会话并调用模型：
+  - 输出 HAMD-17 结构化 JSON（含 `clarify_need`）
+  - 若条目为“类型4：信息缺失”，自动生成一句中文澄清问（失败回退内置模板）
+- 提示词集中在 `services/llm/prompts.py`，可通过以下环境变量覆盖：
+  `PROMPT_HAMD17_PATH`、`PROMPT_DIAGNOSIS_PATH`、`PROMPT_MDD_JUDGMENT_PATH`、`PROMPT_CLARIFY_CN_PATH`
+
 ## 接入听悟实时识别（CreateTask→WS 推流→GetTaskInfo）
 
 - **必要参数**：`ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`TINGWU_APPKEY`（或 `ALIBABA_TINGWU_APPKEY`）、`TINGWU_REGION`（默认 `cn-beijing`）、`TINGWU_SAMPLE_RATE`（采样率，建议 `16000`）、`TINGWU_FORMAT`（音频格式，如 `pcm`）。
