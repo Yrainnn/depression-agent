@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from pydantic import BaseModel, Field
@@ -14,6 +14,7 @@ from services.llm.prompts import (
     get_prompt_clarify_cn,
     get_prompt_diagnosis,
     get_prompt_hamd17,
+    get_prompt_hamd17_controller,
     get_prompt_mdd_judgment,
 )
 
@@ -41,6 +42,24 @@ class HAMDTotal(BaseModel):
 class HAMDResult(BaseModel):
     items: List[HAMDItem]
     total_score: HAMDTotal
+
+
+class ClarifyTarget(BaseModel):
+    item_id: int
+    clarify_need: Optional[str] = None
+
+
+class HAMDPartial(BaseModel):
+    items: List[dict] = Field(default_factory=list)
+    total_score: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ControllerDecision(BaseModel):
+    action: str
+    current_item_id: int
+    next_utterance: str
+    clarify_target: Optional[ClarifyTarget] = None
+    hamd_partial: Optional[HAMDPartial] = None
 
 
 class DeepSeekJSONClient:
@@ -176,6 +195,35 @@ class DeepSeekJSONClient:
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek clarify generation failed: %s", exc)
             return None
+
+    def plan_turn(
+        self,
+        dialogue_json: List[dict],
+        progress: dict,
+    ) -> ControllerDecision:
+        prompt = get_prompt_hamd17_controller()
+        messages = [
+            {"role": "system", "content": prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "dialogue_json": dialogue_json,
+                        "progress": progress,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        content = self._post_chat(
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=2048,
+            temperature=0.2,
+            timeout=25,
+        )
+        data = json.loads(content)
+        return ControllerDecision.model_validate(data)
 
 
 # Convenience singleton -------------------------------------------------

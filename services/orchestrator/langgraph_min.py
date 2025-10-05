@@ -188,75 +188,117 @@ class LangGraphMini:
         )
 
         dialogue_payload = self._build_dialogue_payload(sid)
-        analysis_result = self._run_deepseek_analysis(dialogue_payload)
-        extra_payload: Dict[str, Any] = {}
+        current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
-        if analysis_result:
-            analysis_dict = analysis_result.model_dump()
-            state.analysis = analysis_dict
-            extra_payload["analysis"] = analysis_dict
-            self._store_analysis_scores(sid, state, analysis_result)
+        decision = None
+        if self.deepseek.enabled():
+            try:
+                decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
+            except Exception as exc:  # pragma: no cover - runtime guard
+                LOGGER.warning("DeepSeek controller planning failed: %s", exc)
+
+        if decision and decision.hamd_partial:
+            analysis_payload = decision.hamd_partial.model_dump()
+            state.analysis = analysis_payload
+            try:
+                self.repo.merge_scores(sid, analysis_payload)
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to merge partial HAMD scores for %s", sid)
+            items_payload = analysis_payload.get("items")
+            if isinstance(items_payload, list):
+                state.scores_acc = items_payload
         else:
-            state.analysis = None
-            score_result = self._score_current_item(state, scoring_segments)
-            if score_result:
-                self._merge_scores(state, score_result["per_item_scores"])
-                state.opinion = score_result.get("opinion") or state.opinion
+            analysis_payload = None
 
-        fallback_gaps = self._detect_gaps(state, item_id)
-        if not analysis_result and user_text and state.clarify < 2:
-            if self._is_vague(user_text) or fallback_gaps:
-                state.clarify += 1
-                clarify_key = fallback_gaps[0] if fallback_gaps else "severity"
-                clarify_prompt = pick_clarify(item_id, clarify_key)
-                self._persist_state(state)
-                return self._make_response(
-                    sid,
-                    state,
-                    clarify_prompt,
-                    turn_type="clarify",
-                    extra=extra_payload,
-                )
-
-        clarify_question = None
-        if analysis_result and user_text and state.clarify < 2:
-            clarify_question = self._clarify_from_analysis(
-                state, analysis_result, dialogue_payload
+        if not decision:
+            return self._fallback_flow(
+                sid=sid,
+                state=state,
+                item_id=item_id,
+                scoring_segments=scoring_segments,
+                dialogue=dialogue_payload,
+                transcripts=transcripts,
+                user_text=user_text,
             )
 
-        if clarify_question:
+        if analysis_payload:
+            state.analysis = analysis_payload
+
+        extra: Dict[str, Any] = {}
+        if state.analysis:
+            extra["analysis"] = state.analysis
+
+        next_utt = decision.next_utterance or ""
+
+        if decision.action == "clarify":
+            if decision.clarify_target:
+                try:
+                    self.repo.set_last_clarify_need(
+                        sid,
+                        decision.clarify_target.item_id,
+                        decision.clarify_target.clarify_need or "",
+                    )
+                except Exception:  # pragma: no cover - runtime guard
+                    LOGGER.exception("Failed to persist clarify target for %s", sid)
             state.clarify += 1
-            self._persist_state(state)
+            self._append_turn(
+                sid,
+                state,
+                role="assistant",
+                turn_type="clarify",
+                text=next_utt,
+            )
             return self._make_response(
                 sid,
                 state,
-                clarify_question,
+                next_utt,
                 turn_type="clarify",
-                extra=extra_payload,
+                extra=extra,
+                record=False,
             )
 
-        state.clarify = 0
-
-        next_item = get_next_item(item_id)
-        if next_item != -1:
-            state.index = next_item
-            self._persist_state(state)
-            next_question = pick_primary(next_item)
+        if decision.action == "ask":
+            self._advance_to(sid, decision.current_item_id, state)
+            state.clarify = 0
+            self._append_turn(
+                sid,
+                state,
+                role="assistant",
+                turn_type="ask",
+                text=next_utt,
+            )
             return self._make_response(
                 sid,
                 state,
-                next_question,
+                next_utt,
                 turn_type="ask",
-                extra=extra_payload,
+                extra=extra,
+                record=False,
             )
 
         state.completed = True
         state.index = TOTAL_ITEMS
         self._persist_state(state)
-        summary_payload = self._finalize_scores(
-            sid, state, self.repo.get_transcripts(sid), extra=extra_payload
+        try:
+            self.repo.mark_finished(sid)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to mark session %s finished", sid)
+        completion_text = next_utt or COMPLETION_TEXT
+        self._append_turn(
+            sid,
+            state,
+            role="assistant",
+            turn_type="ask",
+            text=completion_text,
         )
-        return summary_payload
+        return self._make_response(
+            sid,
+            state,
+            completion_text,
+            turn_type="complete",
+            extra=extra,
+            record=False,
+        )
 
     # ------------------------------------------------------------------
     def _make_response(
@@ -268,8 +310,10 @@ class LangGraphMini:
         risk_flag: bool = False,
         turn_type: str = "ask",
         extra: Optional[Dict[str, Any]] = None,
+        record: bool = True,
     ) -> Dict[str, Any]:
-        self._record_assistant_turn(sid, state, text, turn_type)
+        if record:
+            self._record_assistant_turn(sid, state, text, turn_type)
         transcripts = self.repo.get_transcripts(sid)
         tts_url = self._make_tts(sid, text)
         previews = [
@@ -292,23 +336,52 @@ class LangGraphMini:
             payload.update(extra)
         return payload
 
+    def _append_turn(
+        self,
+        sid: str,
+        state: SessionState,
+        *,
+        role: str,
+        turn_type: str,
+        text: str,
+    ) -> None:
+        state.last_utt_index += 1
+        event = {
+            "utt_id": ("a" if role == "assistant" else "u")
+            + str(state.last_utt_index),
+            "text": text,
+            "speaker": "assistant" if role == "assistant" else "patient",
+            "role": role,
+            "type": turn_type,
+            "ts": [0, 0],
+        }
+        self.repo.append_transcript(sid, event)
+        self._persist_state(state)
+
     def _record_assistant_turn(
         self, sid: str, state: SessionState, text: str, turn_type: str
     ) -> None:
         try:
-            state.last_utt_index += 1
-            event = {
-                "utt_id": f"a{state.last_utt_index}",
-                "text": text,
-                "speaker": "assistant",
-                "role": "assistant",
-                "type": turn_type,
-                "ts": [0, 0],
-            }
-            self.repo.append_transcript(sid, event)
-            self._persist_state(state)
+            self._append_turn(
+                sid,
+                state,
+                role="assistant",
+                turn_type=turn_type,
+                text=text,
+            )
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to record assistant turn for %s", sid)
+
+    def _advance_to(
+        self, sid: str, item_id: int, state: Optional[SessionState] = None
+    ) -> SessionState:
+        target = max(get_first_item(), min(int(item_id), TOTAL_ITEMS))
+        if state is None:
+            state = self._load_state(sid)
+        state.index = target
+        state.clarify = 0
+        self._persist_state(state)
+        return state
 
     def _current_item_id(self, state: SessionState) -> int:
         return max(get_first_item(), min(state.index, TOTAL_ITEMS))
@@ -519,6 +592,87 @@ class LangGraphMini:
             if "安全" not in text and "陪伴" not in text:
                 gaps.insert(0, "safety")
         return gaps
+
+    def _fallback_flow(
+        self,
+        *,
+        sid: str,
+        state: SessionState,
+        item_id: int,
+        scoring_segments: List[Dict[str, Any]],
+        dialogue: List[Dict[str, Any]],
+        transcripts: List[Dict[str, Any]],
+        user_text: Optional[str],
+    ) -> Dict[str, Any]:
+        analysis_result = self._run_deepseek_analysis(dialogue)
+        extra_payload: Dict[str, Any] = {}
+
+        if analysis_result:
+            analysis_dict = analysis_result.model_dump()
+            state.analysis = analysis_dict
+            extra_payload["analysis"] = analysis_dict
+            self._store_analysis_scores(sid, state, analysis_result)
+        else:
+            state.analysis = None
+            score_result = self._score_current_item(state, scoring_segments)
+            if score_result:
+                self._merge_scores(state, score_result["per_item_scores"])
+                state.opinion = score_result.get("opinion") or state.opinion
+
+        fallback_gaps = self._detect_gaps(state, item_id)
+        if not analysis_result and user_text and state.clarify < 2:
+            if self._is_vague(user_text) or fallback_gaps:
+                state.clarify += 1
+                clarify_key = fallback_gaps[0] if fallback_gaps else "severity"
+                clarify_prompt = pick_clarify(item_id, clarify_key)
+                self._persist_state(state)
+                return self._make_response(
+                    sid,
+                    state,
+                    clarify_prompt,
+                    turn_type="clarify",
+                    extra=extra_payload,
+                )
+
+        clarify_question = None
+        if analysis_result and user_text and state.clarify < 2:
+            clarify_question = self._clarify_from_analysis(
+                state, analysis_result, dialogue
+            )
+
+        if clarify_question:
+            state.clarify += 1
+            self._persist_state(state)
+            return self._make_response(
+                sid,
+                state,
+                clarify_question,
+                turn_type="clarify",
+                extra=extra_payload,
+            )
+
+        state.clarify = 0
+
+        next_item = get_next_item(item_id)
+        if next_item != -1:
+            state.index = next_item
+            self._persist_state(state)
+            next_question = pick_primary(next_item)
+            return self._make_response(
+                sid,
+                state,
+                next_question,
+                turn_type="ask",
+                extra=extra_payload,
+            )
+
+        state.completed = True
+        state.index = TOTAL_ITEMS
+        self._persist_state(state)
+        summary_payload = self._finalize_scores(
+            sid, state, transcripts, extra=extra_payload
+        )
+        return summary_payload
 
     def _make_tts(self, sid: str, text: str) -> str:
         try:

@@ -138,6 +138,29 @@ class ConversationRepository:
             ttl=self.STATE_TTL_SECONDS,
         )
 
+    def set_last_clarify_need(
+        self, session_id: str, item_id: int, clarify_need: str
+    ) -> None:
+        state = self.load_session_state(session_id) or {}
+        targets = state.get("clarify_targets")
+        if not isinstance(targets, dict):
+            targets = {}
+        targets[str(item_id)] = clarify_need
+        state["clarify_targets"] = targets
+        self.save_session_state(session_id, state)
+
+    def mark_finished(self, session_id: str) -> None:
+        state = self.load_session_state(session_id) or {}
+        state["completed"] = True
+        total = state.get("total")
+        try:
+            index_value = int(total) if total is not None else 17
+        except (TypeError, ValueError):
+            index_value = 17
+        state["index"] = max(index_value, state.get("index", index_value))
+        state.setdefault("total", index_value)
+        self.save_session_state(session_id, state)
+
     # Scores --------------------------------------------------------------
     def save_scores(self, session_id: str, scores: Any) -> None:
         if isinstance(scores, dict):
@@ -165,6 +188,57 @@ class ConversationRepository:
             data.setdefault("per_item_scores", data.get("items", []))
             return data
         return data.get("items", [])
+
+    def get_score(self, session_id: str) -> Optional[Dict[str, Any]]:
+        data = self._get(
+            self._key("score", session_id),
+            legacy_keys=[f"score:{session_id}", f"session:{session_id}:score"],
+        )
+        if data is None:
+            return None
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            return {"items": data}
+        return None
+
+    def set_score(self, session_id: str, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        self._set(
+            self._key("score", session_id),
+            payload,
+            ttl=self.SCORE_TTL_SECONDS,
+        )
+
+    def merge_scores(self, session_id: str, partial: Dict[str, Any]) -> None:
+        if not partial:
+            return
+
+        current = self.get_score(session_id) or {"items": [], "total_score": {}}
+        index: Dict[int, Dict[str, Any]] = {}
+        for item in current.get("items", []):
+            if isinstance(item, dict) and "item_id" in item:
+                try:
+                    key = int(item["item_id"])
+                except (TypeError, ValueError):
+                    continue
+                index[key] = item
+
+        for item in partial.get("items", []):
+            if isinstance(item, dict) and "item_id" in item:
+                try:
+                    key = int(item["item_id"])
+                except (TypeError, ValueError):
+                    continue
+                index[key] = item
+
+        current["items"] = [index[k] for k in sorted(index)]
+        current["per_item_scores"] = current["items"]
+        if "total_score" in partial:
+            current["total_score"] = partial["total_score"]
+
+        self.set_score(session_id, current)
 
     # Transcripts ---------------------------------------------------------
     def append_transcript(self, session_id: str, segment: Dict[str, Any]) -> None:
