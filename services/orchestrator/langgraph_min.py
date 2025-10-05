@@ -15,6 +15,7 @@ from services.llm.prompts import (
     get_prompt_diagnosis,
     get_prompt_mdd_judgment,
 )
+from services.orchestrator.gap_utils import GAP_LABELS, detect_information_gaps
 from services.orchestrator.questions_hamd17 import (
     MAX_SCORE,
     get_first_item,
@@ -87,6 +88,8 @@ class LangGraphMini:
             "持续时间": "每次大约持续多长时间？",
             "严重程度": "这对你的日常影响有多大？",
             "是否否定": "最近两周是否基本没有这种情况？",
+            "是否有计划": "是否有具体计划或准备过相关工具？",
+            "安全保障": "现在身边是否有人陪伴，能保证你的安全？",
         }
         self.ITEM_NAMES = {
             1: "抑郁情绪",
@@ -609,22 +612,7 @@ class LangGraphMini:
         )
 
     def _detect_gaps(self, state: SessionState, item_id: int) -> List[str]:
-        text = (state.last_text or "").lower()
-        gaps: List[str] = []
-        if "次" not in text and "天" not in text and "每周" not in text:
-            gaps.append("frequency")
-        if "整天" not in text and "小时" not in text and "多久" not in text:
-            gaps.append("duration")
-        if "严重" not in text and "很难" not in text and "影响" not in text:
-            gaps.append("severity")
-        if "没有" in text or "不" in text:
-            gaps.append("negation")
-        if item_id == 3:
-            if "计划" not in text:
-                gaps.insert(0, "plan")
-            if "安全" not in text and "陪伴" not in text:
-                gaps.insert(0, "safety")
-        return gaps
+        return detect_information_gaps(state.last_text, item_id=item_id)
 
     def _fallback_flow(
         self,
@@ -652,11 +640,36 @@ class LangGraphMini:
                 self._merge_scores(state, score_result["per_item_scores"])
                 state.opinion = score_result.get("opinion") or state.opinion
 
+        reverse_gap_labels = {label: key for key, label in GAP_LABELS.items()}
         fallback_gaps = self._detect_gaps(state, item_id)
+
+        stored_gap_key: Optional[str] = None
+        try:
+            last_clarify = self.repo.get_last_clarify_need(sid)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to read last clarify target for %s", sid)
+            last_clarify = None
+
+        if last_clarify and last_clarify.get("item_id") == item_id:
+            stored_need = last_clarify.get("need")
+            if isinstance(stored_need, str):
+                stored_gap_key = reverse_gap_labels.get(stored_need, stored_need)
+            if stored_gap_key and stored_gap_key not in fallback_gaps:
+                try:
+                    self.repo.clear_last_clarify_need(sid)
+                except Exception:  # pragma: no cover - runtime guard
+                    LOGGER.exception("Failed to clear clarify target for %s", sid)
+                stored_gap_key = None
+
         if not analysis_result and user_text and state.clarify < 2:
             if self._is_vague(user_text) or fallback_gaps:
                 state.clarify += 1
                 clarify_key = fallback_gaps[0] if fallback_gaps else "severity"
+                clarify_label = GAP_LABELS.get(clarify_key, clarify_key)
+                try:
+                    self.repo.set_last_clarify_need(sid, item_id, clarify_label)
+                except Exception:  # pragma: no cover - runtime guard
+                    LOGGER.exception("Failed to persist clarify target for %s", sid)
                 clarify_prompt = pick_clarify(item_id, clarify_key)
                 self._persist_state(state)
                 return self._make_response(
@@ -690,6 +703,12 @@ class LangGraphMini:
         if next_item != -1:
             state.index = next_item
             self._persist_state(state)
+            try:
+                self.repo.clear_last_clarify_need(sid)
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception(
+                    "Failed to clear clarify target after advancing for %s", sid
+                )
             next_question = pick_primary(next_item)
             return self._make_response(
                 sid,

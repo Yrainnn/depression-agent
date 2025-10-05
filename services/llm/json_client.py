@@ -17,6 +17,8 @@ from services.llm.prompts import (
     get_prompt_hamd17_controller,
     get_prompt_mdd_judgment,
 )
+from services.orchestrator.gap_utils import GAP_LABELS, detect_information_gaps
+from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK
 
 LOGGER = logging.getLogger(__name__)
 
@@ -130,38 +132,38 @@ class DeepSeekJSONClient:
             return HAMDResult.model_validate(parsed)
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analyze failed: %s", exc)
+
             latest_user_text = ""
+            latest_item_id = 1
             for entry in reversed(dialogue_json):
-                if entry.get("role") == "user":
+                role = entry.get("role")
+                if role == "user" and not latest_user_text:
                     latest_user_text = entry.get("text") or ""
-                    break
+                if role == "assistant" and entry.get("text"):
+                    text = str(entry.get("text"))
+                    for item_id, payload in HAMD17_QUESTION_BANK.items():
+                        questions = payload.get("primary", [])
+                        clarifies = []
+                        clarify_map = payload.get("clarify", {})
+                        for value in clarify_map.values():
+                            if isinstance(value, list):
+                                clarifies.extend(value)
+                        if any(q in text or text in q for q in questions + clarifies):
+                            latest_item_id = item_id
+                            break
+                    if latest_item_id != 1:
+                        break
 
-            lowered = (latest_user_text or "").lower()
-            needs_frequency = not any(keyword in lowered for keyword in ("次", "天", "每周"))
-            needs_duration = not any(
-                keyword in lowered for keyword in ("整天", "小时", "多久")
-            )
-            needs_severity = not any(
-                keyword in lowered for keyword in ("严重", "很难", "影响")
-            )
-            needs_negation = any(keyword in lowered for keyword in ("没有", "不"))
-
-            clarify_need: Optional[str] = None
-            if needs_frequency:
-                clarify_need = "频次"
-            elif needs_duration:
-                clarify_need = "持续时间"
-            elif needs_severity:
-                clarify_need = "严重程度"
-            elif needs_negation:
-                clarify_need = "是否否定"
+            gaps = detect_information_gaps(latest_user_text, item_id=latest_item_id)
+            gap_key = gaps[0] if gaps else None
+            clarify_need = GAP_LABELS.get(gap_key, None)
 
             mock = {
                 "items": [
                     {
-                        "item_id": 1,
+                        "item_id": latest_item_id,
                         "symptom_summary": "信息有限",
-                        "dialogue_evidence": "信息缺失",
+                        "dialogue_evidence": latest_user_text or "信息缺失",
                         "evidence_refs": [],
                         "score": 0,
                         "score_type": "类型4",
@@ -180,7 +182,8 @@ class DeepSeekJSONClient:
                         "score_reason": "未涉及",
                         "clarify_need": None,
                     }
-                    for idx in range(2, 18)
+                    for idx in range(1, 18)
+                    if idx != latest_item_id
                 ],
                 "total_score": {
                     "得分序列": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
