@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     def TINGWU_LANG(self) -> str:
         return self.tingwu_lang
 
+    @property
+    def ALIBABA_CLOUD_ACCESS_KEY_ID(self) -> Optional[str]:
+        return self.alibaba_cloud_access_key_id
+
+    @property
+    def ALIBABA_CLOUD_ACCESS_KEY_SECRET(self) -> Optional[str]:
+        return self.alibaba_cloud_access_key_secret
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

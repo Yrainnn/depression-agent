@@ -5,7 +5,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from packages.common.config import settings
 from services.orchestrator.langgraph_min import orchestrator
 from services.report.build import build_pdf
+from services.tts.tts_adapter import TTSAdapter
 from services.store.repository import repository
 
 router = APIRouter()
@@ -48,6 +49,10 @@ class StepResponse(BaseModel):
     risk_flag: bool
     tts_text: Optional[str] = None
     tts_url: Optional[str] = None
+    segments_previews: Optional[List[str]] = None
+
+    class Config:
+        extra = "allow"
 
 
 @router.post("/dm/step", response_model=StepResponse)
@@ -107,6 +112,25 @@ async def asr_transcribe(payload: AsrTranscribeRequest) -> AsrTranscribeResponse
         segments_count=len(segments),
         json_url=f"file://{transcript_path}",
     )
+
+
+
+
+class TTSPayload(BaseModel):
+    sid: str
+    text: str
+    voice: Optional[str] = None
+
+
+@router.post("/tts/say")
+async def tts_say(payload: TTSPayload) -> Dict[str, Any]:
+    _validate_sid(payload.sid)
+    tts = TTSAdapter()
+    try:
+        url = tts.synthesize(payload.sid, payload.text, payload.voice)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"tts_url": url}
 
 
 @router.post("/upload/audio")

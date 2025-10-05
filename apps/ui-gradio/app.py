@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import gradio as gr
 import requests
 
-
 API_BASE = (
     os.getenv("DM_API_BASE", os.getenv("API_BASE_URL", "http://localhost:8080"))
     or "http://localhost:8080"
@@ -19,7 +18,9 @@ def _init_session() -> str:
     return str(uuid.uuid4())
 
 
-def _call_dm_step(sid: str, text: Optional[str] = None, audio_ref: Optional[str] = None) -> Dict[str, Any]:
+def _call_dm_step(
+    sid: str, text: Optional[str] = None, audio_ref: Optional[str] = None
+) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"sid": sid}
     if text:
         payload["text"] = text
@@ -37,7 +38,7 @@ def _upload_audio(sid: str, file_path: str) -> str:
     with open(file_path, "rb") as handle:
         files = {"file": (file_name, handle, "application/octet-stream")}
         data = {"sid": sid}
-        response = requests.post(url, files=files, data=data, timeout=30)
+        response = requests.post(url, files=files, data=data, timeout=60)
     response.raise_for_status()
     payload = response.json()
     audio_ref = payload.get("audio_ref")
@@ -46,28 +47,42 @@ def _upload_audio(sid: str, file_path: str) -> str:
     return audio_ref
 
 
+def _generate_report(session_id: str) -> str:
+    try:
+        resp = requests.post(
+            f"{API_BASE}/report/build", json={"sid": session_id}, timeout=60
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        url = data.get("report_url")
+        if url:
+            return f"✅ 报告已生成：{url}"
+        return "⚠️ 报告生成成功但未返回链接。"
+    except Exception as exc:  # noqa: BLE001 - surface to UI
+        return f"❌ 报告生成失败：{exc}"
+
+
 def user_step(
     message: str,
     audio_path: Optional[str],
     history: List[Tuple[str, str]],
     session_id: str,
-) -> Tuple[List[Tuple[str, str]], str, Dict[str, Any], str]:
+) -> Tuple[List[Tuple[str, str]], str, Dict[str, Any], str, Optional[str]]:
     message = message or ""
     text_payload = message.strip() or None
     audio_ref: Optional[str] = None
     risk_text = "无紧急风险提示。"
     progress: Dict[str, Any] = {}
+    audio_value: Optional[str] = None
 
     try:
         if audio_path:
             audio_ref = _upload_audio(session_id, audio_path)
-            # When audio is provided, text becomes optional.
             if not text_payload:
                 text_payload = None
 
         result = _call_dm_step(session_id, text=text_payload, audio_ref=audio_ref)
     except Exception as exc:  # noqa: BLE001 - surface API failures to the UI
-        user_label: str
         if text_payload:
             user_label = message
         elif audio_path:
@@ -76,10 +91,19 @@ def user_step(
             user_label = "[空输入]"
 
         history = history + [(user_label, f"❌ 请求失败：{exc}")]
-        return history, "⚠️ 请求失败，请稍后重试。", {}, session_id
+        return history, "⚠️ 请求失败，请稍后重试。", {}, session_id, None
 
     assistant_reply = result.get("next_utterance", "")
     previews = result.get("segments_previews") or []
+    tts_url = result.get("tts_url")
+    if tts_url:
+        if tts_url.startswith("file://"):
+            local_path = tts_url[7:]
+            if Path(local_path).exists():
+                audio_value = local_path
+        else:
+            audio_value = tts_url
+
     if previews:
         recent_previews = previews[-2:]
         preview_text = "\n".join(f"- {item}" for item in recent_previews if item)
@@ -95,7 +119,6 @@ def user_step(
     if user_label:
         history = history + [(user_label, assistant_reply)]
     else:
-        # First question fetch or empty input -> only append assistant reply.
         history = history + [(None, assistant_reply)]
 
     progress = result.get("progress", {})
@@ -104,7 +127,7 @@ def user_step(
         "⚠️ 检测到高风险，请立即寻求紧急帮助。" if risk_flag else "无紧急风险提示。"
     )
 
-    return history, risk_text, progress, session_id
+    return history, risk_text, progress, session_id, audio_value
 
 
 def build_ui() -> gr.Blocks:
@@ -112,21 +135,33 @@ def build_ui() -> gr.Blocks:
         session_state = gr.State(_init_session())
 
         gr.Markdown("# 抑郁随访助手")
-        chatbot = gr.Chatbot(height=400, label="对话")
-        text_input = gr.Textbox(label="患者输入", placeholder="请输入文本")
-        audio_input = gr.File(label="上传音频(16k mono)", type="filepath")
-        risk_alert = gr.Markdown("无紧急风险提示。")
-        progress_display = gr.JSON(label="进度状态")
-        send_button = gr.Button("发送")
+
+        with gr.Tabs():
+            with gr.Tab("评估"):
+                chatbot = gr.Chatbot(height=400, label="对话")
+                text_input = gr.Textbox(label="患者输入", placeholder="请输入文本")
+                audio_input = gr.File(label="上传音频(16k mono)", type="filepath")
+                audio_sys = gr.Audio(label="系统语音", interactive=False, autoplay=True)
+                risk_alert = gr.Markdown("无紧急风险提示。")
+                progress_display = gr.JSON(label="进度状态")
+                send_button = gr.Button("发送")
+
+            with gr.Tab("报告"):
+                gr.Markdown("## 生成评估报告")
+                gr.Markdown("点击按钮后将在 /tmp/depression_agent_reports/ 下生成 PDF。")
+                report_button = gr.Button("生成报告")
+                report_status = gr.Markdown("等待生成指令…")
 
         def _on_submit(
             message: str,
             audio_path: Optional[str],
             history: List[Tuple[str, str]],
             session_id: str,
-        ):
-            chat, risk_text, progress, sid = user_step(message, audio_path, history, session_id)
-            return chat, "", None, sid, risk_text, progress
+        ) -> Tuple[List[Tuple[str, str]], str, Optional[str], str, str, Dict[str, Any], Optional[str]]:
+            chat, risk_text, progress, sid, audio_value = user_step(
+                message, audio_path, history, session_id
+            )
+            return chat, "", None, sid, risk_text, progress, audio_value
 
         text_input.submit(
             _on_submit,
@@ -138,6 +173,7 @@ def build_ui() -> gr.Blocks:
                 session_state,
                 risk_alert,
                 progress_display,
+                audio_sys,
             ],
         )
 
@@ -151,7 +187,14 @@ def build_ui() -> gr.Blocks:
                 session_state,
                 risk_alert,
                 progress_display,
+                audio_sys,
             ],
+        )
+
+        report_button.click(
+            lambda sid: _generate_report(sid),
+            inputs=[session_state],
+            outputs=[report_status],
         )
 
     return demo

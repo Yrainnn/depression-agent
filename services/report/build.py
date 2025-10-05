@@ -18,11 +18,17 @@ except Exception:  # pragma: no cover - runtime guard
     ConversationRepository = None  # type: ignore
     _shared_repository = None  # type: ignore
 
+from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK, MAX_SCORE
 
 LOGGER = logging.getLogger(__name__)
 
 REPORT_VERSION = "v0.2"
 REPORT_DIR = Path("/tmp/depression_agent_reports")
+HAMD_TOTAL = sum(MAX_SCORE.values())
+QUESTION_LOOKUP = {
+    f"H{idx:02d}": (node.get("primary") or ["请描述该条目相关情况。"])[0]
+    for idx, node in HAMD17_QUESTION_BANK.items()
+}
 
 
 def _resolve_repository() -> Optional[ConversationRepository]:  # type: ignore[valid-type]
@@ -39,14 +45,37 @@ def _resolve_repository() -> Optional[ConversationRepository]:  # type: ignore[v
     return None
 
 
-def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> List[Dict[str, Any]]:
-    normalized: List[Dict[str, Any]] = []
+def _question_for(item_id: str) -> str:
+    if item_id in QUESTION_LOOKUP:
+        return QUESTION_LOOKUP[item_id]
+    if item_id.startswith("H") and item_id[1:].isdigit():
+        lookup = f"H{int(item_id[1:]):02d}"
+        return QUESTION_LOOKUP.get(lookup, QUESTION_LOOKUP.get("H01", "条目信息"))
+    if item_id.isdigit():
+        lookup = f"H{int(item_id):02d}"
+        return QUESTION_LOOKUP.get(lookup, QUESTION_LOOKUP.get("H01", "条目信息"))
+    return QUESTION_LOOKUP.get("H01", "条目信息")
+
+
+def _max_for(item_id: str) -> Optional[int]:
+    if item_id.startswith("H") and item_id[1:].isdigit():
+        return MAX_SCORE.get(int(item_id[1:]))
+    if item_id.isdigit():
+        return MAX_SCORE.get(int(item_id))
+    return None
+
+
+def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
+    normalized: Dict[str, Dict[str, Any]] = {}
     for item in raw_scores or []:
         if not isinstance(item, dict):
             continue
-        score = item.get("score")
+        item_id = str(item.get("item_id") or item.get("name") or "")
+        if not item_id:
+            continue
         try:
-            score_value = float(score) if score is not None else None
+            score_value = item.get("score")
+            score_value = float(score_value) if score_value is not None else None
         except (TypeError, ValueError):
             score_value = None
         confidence = item.get("confidence") or item.get("confidence_score")
@@ -58,28 +87,62 @@ def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> List[Dict[str, Any]
                 evidence_refs = [evidence_refs]
         if not isinstance(evidence_refs, list):
             evidence_refs = [str(evidence_refs)]
-        normalized.append(
-            {
-                "item_id": item.get("item_id") or item.get("name") or "",
-                "question": item.get("question") or item.get("name") or "",
-                "score": score_value if score_value is not None else item.get("score", 0),
-                "confidence": confidence,
-                "evidence_refs": [str(ref) for ref in evidence_refs if ref],
-            }
-        )
+        max_score = item.get("max_score")
+        if not isinstance(max_score, (int, float)):
+            fallback = _max_for(item_id)
+            if fallback is not None:
+                max_score = fallback
+            else:
+                max_score = None
+        normalized[item_id] = {
+            "item_id": item_id,
+            "question": item.get("question") or _question_for(item_id),
+            "score": score_value,
+            "confidence": confidence,
+            "max_score": max_score,
+            "evidence_refs": [str(ref) for ref in evidence_refs if ref],
+        }
     return normalized
 
 
-def _compute_total_score(per_item_scores: List[Dict[str, Any]], score_json: Dict[str, Any]) -> float:
+def _expand_scores(per_item: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for idx in range(1, len(MAX_SCORE) + 1):
+        key = f"H{idx:02d}"
+        base = {
+            "item_id": key,
+            "question": QUESTION_LOOKUP.get(key, f"条目 {idx}"),
+            "max_score": MAX_SCORE.get(idx, ""),
+            "score": None,
+            "score_display": "—",
+            "confidence": None,
+            "evidence_refs": [],
+        }
+        data = per_item.get(key) or per_item.get(str(idx))
+        if data:
+            score_val = data.get("score")
+            if isinstance(score_val, (int, float)):
+                base["score"] = score_val
+                base["score_display"] = str(int(score_val)) if float(score_val).is_integer() else f"{score_val:.1f}"
+            confidence = data.get("confidence")
+            if confidence is not None:
+                base["confidence"] = confidence
+            refs = data.get("evidence_refs") or []
+            if isinstance(refs, list):
+                base["evidence_refs"] = [str(ref) for ref in refs if ref]
+        rows.append(base)
+    return rows
+
+
+def _compute_total_score(expanded_scores: List[Dict[str, Any]], score_json: Dict[str, Any]) -> float:
     total = score_json.get("total_score")
     if isinstance(total, (int, float)):
         return float(total)
     accum = 0.0
-    for item in per_item_scores:
-        try:
-            accum += float(item.get("score", 0) or 0)
-        except (TypeError, ValueError):
-            continue
+    for item in expanded_scores:
+        score = item.get("score")
+        if isinstance(score, (int, float)):
+            accum += float(score)
     return round(accum, 2)
 
 
@@ -153,12 +216,13 @@ def _prepare_risk_events(repo: Optional[ConversationRepository], sid: str) -> Li
 
 def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
     repo = _resolve_repository()
-    per_item_scores = _normalize_per_item_scores(
+    per_item_map = _normalize_per_item_scores(
         score_json.get("per_item_scores")
         or score_json.get("items")
         or score_json.get("scores")
         or []
     )
+    expanded_scores = _expand_scores(per_item_map)
 
     summary = score_json.get("summary")
     opinion = score_json.get("opinion") if isinstance(score_json.get("opinion"), dict) else {}
@@ -166,9 +230,9 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         summary = opinion.get("summary") or opinion.get("overall") or ""
     rationale = opinion.get("rationale") if isinstance(opinion, dict) else ""
 
-    total_score = _compute_total_score(per_item_scores, score_json)
-
+    total_score = _compute_total_score(expanded_scores, score_json)
     risk_events = _prepare_risk_events(repo, sid)
+    has_scores = any(isinstance(item.get("score"), (int, float)) for item in expanded_scores)
 
     context = {
         "sid": sid,
@@ -177,8 +241,10 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         "summary": summary,
         "rationale": rationale,
         "total_score": total_score,
-        "per_item_scores": per_item_scores,
+        "max_total": HAMD_TOTAL,
+        "expanded_scores": expanded_scores,
         "risk_events": risk_events,
+        "has_scores": has_scores,
     }
 
     base_styles = """
@@ -194,6 +260,7 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         .muted { color: #7f8c8d; font-size: 12px; }
         ul { padding-left: 20px; }
         li { margin-bottom: 6px; }
+        .footnote { margin-top: 24px; font-size: 11px; color: #95a5a6; }
     </style>
     """
 
@@ -215,20 +282,31 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         {% endif %}
         <div class=\"section\">
             <h2>总分</h2>
-            <div class=\"score-total\">{{ total_score }} / 27</div>
+            <div class=\"score-total\">{{ total_score }} / {{ max_total }}</div>
         </div>
-        {% if per_item_scores %}
         <div class=\"section\">
-            <h2>分项分</h2>
+            <h2>分项明细</h2>
+            {% if not has_scores %}
+            <p>数据不足，建议线下面谈。</p>
+            {% endif %}
             <table>
                 <thead>
-                    <tr><th>条目 ID</th><th>分数 (0-3)</th><th>置信度</th><th>证据引用</th></tr>
+                    <tr>
+                        <th>条目 ID</th>
+                        <th>题干</th>
+                        <th>分数</th>
+                        <th>上限</th>
+                        <th>置信度</th>
+                        <th>证据引用</th>
+                    </tr>
                 </thead>
                 <tbody>
-                    {% for item in per_item_scores %}
+                    {% for item in expanded_scores %}
                     <tr>
-                        <td>{{ item.item_id or '—' }}</td>
-                        <td>{{ item.score }}</td>
+                        <td>{{ item.item_id }}</td>
+                        <td>{{ item.question }}</td>
+                        <td>{{ item.score_display }}</td>
+                        <td>{{ item.max_score }}</td>
                         <td>{{ item.confidence or '—' }}</td>
                         <td>{{ item.evidence_refs | join(', ') if item.evidence_refs else '—' }}</td>
                     </tr>
@@ -236,12 +314,6 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
                 </tbody>
             </table>
         </div>
-        {% else %}
-        <div class=\"section\">
-            <h2>评估结果</h2>
-            <p>数据不足，建议线下面谈。</p>
-        </div>
-        {% endif %}
         <div class=\"section\">
             <h2>风险事件摘要</h2>
             {% if risk_events %}
@@ -254,6 +326,7 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
             <p>无风险事件记录。</p>
             {% endif %}
         </div>
+        <div class=\"footnote\">* 若使用 mock 评分，仅供调试。</div>
     </body>
     </html>
     """.replace("__BASE_STYLES__", base_styles)
