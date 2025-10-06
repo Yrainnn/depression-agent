@@ -9,7 +9,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from packages.common.config import settings
 from services.audio.asr_adapter import AsrError, StubASR, TingwuClientASR
-from services.llm.json_client import ControllerDecision, DeepSeekJSONClient, HAMDResult
+from services.llm.json_client import (
+    ControllerDecision,
+    DeepSeekJSONClient,
+    DeepSeekTemporarilyUnavailableError,
+    HAMDResult,
+)
 from services.llm.prompts import (
     get_prompt_hamd17,
     get_prompt_diagnosis,
@@ -214,14 +219,20 @@ class LangGraphMini:
         dialogue_payload = self._build_dialogue_payload(sid)
         current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
-        controller_enabled = settings.ENABLE_DS_CONTROLLER and self.deepseek.enabled()
+        controller_enabled = (
+            settings.ENABLE_DS_CONTROLLER and self.deepseek.usable()
+        )
 
         if not controller_enabled:
             if not state.controller_notice_logged:
                 reason = (
                     "disabled via settings"
                     if not settings.ENABLE_DS_CONTROLLER
-                    else "client not configured"
+                    else (
+                        "client not configured"
+                        if not self.deepseek.enabled()
+                        else "temporarily unavailable"
+                    )
                 )
                 LOGGER.info("DeepSeek controller unavailable for %s: %s", sid, reason)
                 state.controller_notice_logged = True
@@ -258,6 +269,20 @@ class LangGraphMini:
         decision: Optional[ControllerDecision] = None
         try:
             decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
+            state.controller_notice_logged = True
+            state.controller_unusable_turn = state.last_utt_index
+            self._persist_state(state)
+            return self._fallback_flow(
+                sid=sid,
+                state=state,
+                item_id=item_id,
+                scoring_segments=scoring_segments,
+                dialogue=dialogue_payload,
+                transcripts=transcripts,
+                user_text=user_text,
+            )
         except Exception as exc:  # pragma: no cover - runtime guard
             log_method = LOGGER.warning
             if state.controller_notice_logged:
@@ -653,7 +678,7 @@ class LangGraphMini:
         transcripts: List[Dict[str, Any]],
         dialogue: Optional[List[Dict[str, Any]]],
     ) -> Optional[Dict[str, Any]]:
-        if not self.deepseek.enabled():
+        if not self.deepseek.usable():
             return None
 
         dialogue_payload = list(dialogue) if dialogue else self._build_dialogue_payload(
@@ -664,6 +689,9 @@ class LangGraphMini:
 
         try:
             result = self.deepseek.analyze(dialogue_payload, get_prompt_hamd17())
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek semantic scoring skipped for %s: %s", state.sid, exc)
+            return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.debug(
                 "DeepSeek semantic scoring skipped for %s: %s", state.sid, exc
@@ -1019,10 +1047,13 @@ class LangGraphMini:
     def _run_deepseek_analysis(self, dialogue: List[Dict[str, Any]]) -> Optional[HAMDResult]:
         if not dialogue:
             return None
-        if not self.deepseek.enabled():
+        if not self.deepseek.usable():
             return None
         try:
             return self.deepseek.analyze(dialogue, get_prompt_hamd17())
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek analysis temporarily unavailable: %s", exc)
+            return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analysis skipped: %s", exc)
             return None
@@ -1079,7 +1110,7 @@ class LangGraphMini:
             [entry.get("text", "") for entry in dialogue if entry.get("role") == "user"][-2:]
         )
         question = None
-        if self.deepseek.enabled():
+        if self.deepseek.usable():
             question = self.deepseek.gen_clarify_question(
                 target.item_id,
                 self.ITEM_NAMES.get(target.item_id, f"条目{target.item_id}"),
