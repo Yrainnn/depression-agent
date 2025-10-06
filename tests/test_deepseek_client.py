@@ -35,6 +35,9 @@ config_stub = types.ModuleType("packages.common.config")
 class _Settings:
     deepseek_api_base: str | None = None
     deepseek_api_key: str | None = None
+    deepseek_chat_timeout: float = 90.0
+    deepseek_clarify_timeout: float = 60.0
+    deepseek_controller_timeout: float = 90.0
 
 
 config_stub.settings = _Settings()

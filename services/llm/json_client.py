@@ -83,6 +83,9 @@ class DeepSeekJSONClient:
         self.base = base or settings.deepseek_api_base
         self.key = key or settings.deepseek_api_key
         self.model = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.chat_timeout = float(settings.deepseek_chat_timeout)
+        self.clarify_timeout = float(settings.deepseek_clarify_timeout)
+        self.controller_timeout = float(settings.deepseek_controller_timeout)
         self._warned_bad_base = False
         self._circuit_open_until: Optional[float] = None
         trimmed_base = (self.base or "").rstrip("/")
@@ -110,11 +113,12 @@ class DeepSeekJSONClient:
             return False
         return True
 
-    def _trip_circuit(self, duration: float = 45.0) -> None:
-        if duration <= 0:
+    def _trip_circuit(self, duration: Optional[float] = None) -> None:
+        effective = self.chat_timeout if duration is None else duration
+        if effective <= 0:
             self._circuit_open_until = None
             return
-        self._circuit_open_until = monotonic() + duration
+        self._circuit_open_until = monotonic() + effective
 
     @retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
     def _post_chat(
@@ -124,7 +128,7 @@ class DeepSeekJSONClient:
         response_format: Optional[dict] = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
-        timeout: float = 45.0,
+        timeout: Optional[float] = None,
     ) -> str:
         if not self.enabled():  # pragma: no cover - guard rail
             raise RuntimeError("DeepSeek client not configured")
@@ -186,7 +190,8 @@ class DeepSeekJSONClient:
         if response_format:
             payload["response_format"] = response_format
 
-        with httpx.Client(timeout=timeout) as client:
+        effective_timeout = self.chat_timeout if timeout is None else timeout
+        with httpx.Client(timeout=effective_timeout) as client:
             try:
                 response = client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
@@ -231,6 +236,7 @@ class DeepSeekJSONClient:
             content = self._post_chat(
                 messages=messages,
                 response_format={"type": "json_object"},
+                timeout=self.chat_timeout,
             )
             parsed = json.loads(content)
             return HAMDResult.model_validate(parsed)
@@ -319,7 +325,7 @@ class DeepSeekJSONClient:
                 response_format=None,
                 max_tokens=64,
                 temperature=0.2,
-                timeout=30,
+                timeout=self.clarify_timeout,
             )
             text = (content or "").strip()
             for end in ["？", "。", "!", "！", "?"]:
@@ -361,7 +367,7 @@ class DeepSeekJSONClient:
             response_format={"type": "json_object"},
             max_tokens=2048,
             temperature=0.2,
-            timeout=45,
+            timeout=self.controller_timeout,
         )
         data = json.loads(content)
         return ControllerDecision.model_validate(data)
