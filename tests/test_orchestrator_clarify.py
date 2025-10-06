@@ -157,7 +157,6 @@ def test_clarify_does_not_jump_to_previous_items() -> None:
     orchestrator = LangGraphMini.__new__(LangGraphMini)
     orchestrator.deepseek = _DummyDeepSeek()
     orchestrator.ITEM_NAMES = {3: "自杀倾向", 15: "疑病倾向"}
-    orchestrator.CLARIFY_FALLBACKS = {"频次": "这种情况大概一周发生几次？"}
 
     state = SessionState(sid="sid", index=15)
 

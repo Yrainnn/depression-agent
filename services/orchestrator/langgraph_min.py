@@ -106,14 +106,6 @@ class LangGraphMini:
         self.deepseek = DeepSeekJSONClient()
         self.prompt_diagnosis = get_prompt_diagnosis
         self.prompt_mdd = get_prompt_mdd_judgment
-        self.CLARIFY_FALLBACKS = {
-            "频次": "这种情况大概一周发生几次？",
-            "持续时间": "每次大约持续多长时间？",
-            "严重程度": "这对你的日常影响有多大？",
-            "是否否定": "最近两周是否基本没有这种情况？",
-            "是否有计划": "是否有具体计划或准备过相关工具？",
-            "安全保障": "现在身边是否有人陪伴，能保证你的安全？",
-        }
         self.ITEM_NAMES = {
             1: "抑郁情绪",
             2: "有罪感",
@@ -347,7 +339,13 @@ class LangGraphMini:
             LOGGER.exception("Failed to load last clarify target for %s", sid)
             last_clarify = None
 
-        if decision.action == "clarify" and last_clarify and (user_text or prepared_segments):
+        decision_action = decision.action
+
+        if (
+            decision.action == "clarify"
+            and last_clarify
+            and (user_text or prepared_segments)
+        ):
             LOGGER.debug("Clarify override triggered for %s after user response", sid)
             try:
                 self.repo.clear_last_clarify_need(sid)
@@ -359,9 +357,6 @@ class LangGraphMini:
                 next_utt = COMPLETION_TEXT
             else:
                 decision_action = "ask"
-                next_utt = pick_primary(forced_target)
-        else:
-            decision_action = decision.action
 
         if decision_action == "clarify":
             if decision.clarify_target:
@@ -373,6 +368,21 @@ class LangGraphMini:
                     )
                 except Exception:  # pragma: no cover - runtime guard
                     LOGGER.exception("Failed to persist clarify target for %s", sid)
+            target_item_id = (
+                decision.clarify_target.item_id
+                if decision.clarify_target
+                else last_clarify.get("item_id")
+                if isinstance(last_clarify, dict)
+                else item_id
+            )
+            clarify_gap = (
+                decision.clarify_target.clarify_need
+                if decision.clarify_target and decision.clarify_target.clarify_need
+                else last_clarify.get("need")
+                if isinstance(last_clarify, dict)
+                else ""
+            )
+            next_utt = pick_clarify(target_item_id, clarify_gap)
             state.clarify += 1
             self._append_turn(
                 sid,
@@ -391,10 +401,16 @@ class LangGraphMini:
             )
 
         if decision_action == "ask":
-            target_item = forced_target or decision.current_item_id
+            target_item = forced_target
             if target_item in (None, 0):
                 target_item = get_next_item(item_id)
+            if target_item in (None, -1):
+                decision_action = "finish"
+                next_utt = COMPLETION_TEXT
+            else:
+                next_utt = pick_primary(target_item)
 
+        if decision_action == "ask":
             # 末条护栏：已在最后一条且没有待澄清，直接完成
             if item_id == TOTAL_ITEMS:
                 try:
@@ -1179,16 +1195,7 @@ class LangGraphMini:
         evidence_text = "；".join(
             [entry.get("text", "") for entry in dialogue if entry.get("role") == "user"][-2:]
         )
-        question = None
-        if self.deepseek.usable():
-            question = self.deepseek.gen_clarify_question(
-                target.item_id,
-                self.ITEM_NAMES.get(target.item_id, f"条目{target.item_id}"),
-                clarify_need,
-                evidence_text,
-            )
-        if not question:
-            question = self.CLARIFY_FALLBACKS.get(clarify_need, "能再具体说说这个情况吗？")
+        question = pick_clarify(target.item_id, clarify_need)
         return question, target.item_id, clarify_need
 
 
