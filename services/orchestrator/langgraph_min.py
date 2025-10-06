@@ -5,17 +5,21 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from packages.common.config import settings
 from services.audio.asr_adapter import AsrError, StubASR, TingwuClientASR
-from services.llm.json_client import ControllerDecision, DeepSeekJSONClient, HAMDResult
+from services.llm.json_client import (
+    ControllerDecision,
+    DeepSeekJSONClient,
+    DeepSeekTemporarilyUnavailableError,
+    HAMDResult,
+)
 from services.llm.prompts import (
     get_prompt_hamd17,
     get_prompt_diagnosis,
     get_prompt_mdd_judgment,
 )
-from services.orchestrator.gap_utils import GAP_LABELS, detect_information_gaps
 from services.orchestrator.questions_hamd17 import (
     MAX_SCORE,
     get_first_item,
@@ -61,20 +65,6 @@ RISK_RELEASE_PATTERNS = [
         r"不会伤害自己",
         r"不會傷害自己",
     ]
-]
-
-VAGUE_PHRASES = [
-    "还好",
-    "一般",
-    "差不多",
-    "说不清",
-    "不好说",
-    "看情况",
-    "可能吧",
-    "偶尔吧",
-    "有点吧",
-    "还行",
-    "凑合",
 ]
 
 
@@ -229,14 +219,20 @@ class LangGraphMini:
         dialogue_payload = self._build_dialogue_payload(sid)
         current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
-        controller_enabled = settings.ENABLE_DS_CONTROLLER and self.deepseek.enabled()
+        controller_enabled = (
+            settings.ENABLE_DS_CONTROLLER and self.deepseek.usable()
+        )
 
         if not controller_enabled:
             if not state.controller_notice_logged:
                 reason = (
                     "disabled via settings"
                     if not settings.ENABLE_DS_CONTROLLER
-                    else "client not configured"
+                    else (
+                        "client not configured"
+                        if not self.deepseek.enabled()
+                        else "temporarily unavailable"
+                    )
                 )
                 LOGGER.info("DeepSeek controller unavailable for %s: %s", sid, reason)
                 state.controller_notice_logged = True
@@ -273,6 +269,20 @@ class LangGraphMini:
         decision: Optional[ControllerDecision] = None
         try:
             decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
+            state.controller_notice_logged = True
+            state.controller_unusable_turn = state.last_utt_index
+            self._persist_state(state)
+            return self._fallback_flow(
+                sid=sid,
+                state=state,
+                item_id=item_id,
+                scoring_segments=scoring_segments,
+                dialogue=dialogue_payload,
+                transcripts=transcripts,
+                user_text=user_text,
+            )
         except Exception as exc:  # pragma: no cover - runtime guard
             log_method = LOGGER.warning
             if state.controller_notice_logged:
@@ -649,11 +659,50 @@ class LangGraphMini:
         self,
         state: SessionState,
         transcripts: List[Dict[str, Any]],
+        dialogue: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not transcripts:
             return None
 
+        semantic_result = self._semantic_score_current_item(
+            state, transcripts, dialogue
+        )
+        if semantic_result:
+            return semantic_result
+
+        return None
+
+    def _semantic_score_current_item(
+        self,
+        state: SessionState,
+        transcripts: List[Dict[str, Any]],
+        dialogue: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        if not self.deepseek.usable():
+            return None
+
+        dialogue_payload = list(dialogue) if dialogue else self._build_dialogue_payload(
+            state.sid
+        )
+        if not dialogue_payload:
+            return None
+
+        try:
+            result = self.deepseek.analyze(dialogue_payload, get_prompt_hamd17())
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek semantic scoring skipped for %s: %s", state.sid, exc)
+            return None
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.debug(
+                "DeepSeek semantic scoring skipped for %s: %s", state.sid, exc
+            )
+            return None
+
         item_id = self._current_item_id(state)
+        target = next((item for item in result.items if item.item_id == item_id), None)
+        if target is None:
+            return None
+
         question = pick_primary(item_id)
         latest_segment = next(
             (
@@ -663,17 +712,24 @@ class LangGraphMini:
             ),
             transcripts[-1],
         )
-        text = str(latest_segment.get("text", ""))
-        score = self._rule_based_score(text, item_id)
-        evidence_refs = [latest_segment.get("utt_id", "")]
+        evidence_refs = [ref for ref in target.evidence_refs if ref]
+        if not evidence_refs and latest_segment:
+            evidence_id = latest_segment.get("utt_id", "")
+            if evidence_id:
+                evidence_refs = [evidence_id]
 
-        per_item_score = {
+        per_item_score: Dict[str, Any] = {
             "item_id": f"H{item_id:02d}",
             "name": question,
             "question": question,
-            "score": score,
+            "score": min(int(target.score), MAX_SCORE.get(item_id, 4)),
             "max_score": MAX_SCORE.get(item_id, 4),
             "evidence_refs": evidence_refs,
+            "score_type": target.score_type,
+            "score_reason": target.score_reason,
+            "dialogue_evidence": target.dialogue_evidence,
+            "symptom_summary": target.symptom_summary,
+            "clarify_need": target.clarify_need,
         }
 
         opinion = self._generate_opinion(state.scores_acc, per_item_score)
@@ -682,22 +738,6 @@ class LangGraphMini:
             "per_item_scores": [per_item_score],
             "opinion": opinion,
         }
-
-    def _rule_based_score(self, text: str, item_id: int) -> int:
-        normalized = text.strip()
-        lowered = normalized.lower()
-        max_score = MAX_SCORE.get(item_id, 4)
-        if not normalized:
-            return 0
-        if any(keyword in normalized for keyword in ["没有", "不", "很少", "没"]):
-            return 0
-        if any(keyword in normalized for keyword in ["严重", "完全", "一直", "难以"]):
-            return min(4, max_score)
-        if any(keyword in lowered for keyword in ["经常", "很多", "每天", "总是"]):
-            return min(3, max_score)
-        if any(keyword in lowered for keyword in ["有时", "偶尔", "有点", "几天"]):
-            return min(2, max_score)
-        return 1 if max_score >= 1 else 0
 
     def _merge_scores(self, state: SessionState, new_scores: List[Dict[str, Any]]) -> None:
         scores_by_id = {score["item_id"]: score for score in state.scores_acc}
@@ -764,9 +804,6 @@ class LangGraphMini:
             turn_type="complete",
         )
 
-    def _detect_gaps(self, state: SessionState, item_id: int) -> List[str]:
-        return detect_information_gaps(state.last_text, item_id=item_id)
-
     def _fallback_flow(
         self,
         *,
@@ -787,16 +824,20 @@ class LangGraphMini:
             extra_payload["analysis"] = analysis_dict
             self._store_analysis_scores(sid, state, analysis_result)
         else:
-            state.analysis = None
-            score_result = self._score_current_item(state, scoring_segments)
+            score_result = self._score_current_item(state, scoring_segments, dialogue)
             if score_result:
                 self._merge_scores(state, score_result["per_item_scores"])
                 state.opinion = score_result.get("opinion") or state.opinion
 
-        reverse_gap_labels = {label: key for key, label in GAP_LABELS.items()}
-        fallback_gaps = self._detect_gaps(state, item_id)
+        active_clarify_need: Optional[str] = None
+        if analysis_result:
+            target_item = next(
+                (item for item in analysis_result.items if item.item_id == item_id),
+                None,
+            )
+            if target_item:
+                active_clarify_need = target_item.clarify_need or None
 
-        stored_gap_key: Optional[str] = None
         try:
             last_clarify = self.repo.get_last_clarify_need(sid)
         except Exception:  # pragma: no cover - runtime guard
@@ -805,41 +846,27 @@ class LangGraphMini:
 
         if last_clarify and last_clarify.get("item_id") == item_id:
             stored_need = last_clarify.get("need")
-            if isinstance(stored_need, str):
-                stored_gap_key = reverse_gap_labels.get(stored_need, stored_need)
-            if stored_gap_key and stored_gap_key not in fallback_gaps:
+            if not active_clarify_need or stored_need != active_clarify_need:
                 try:
                     self.repo.clear_last_clarify_need(sid)
                 except Exception:  # pragma: no cover - runtime guard
                     LOGGER.exception("Failed to clear clarify target for %s", sid)
-                stored_gap_key = None
 
-        if not analysis_result and user_text and state.clarify < 2:
-            if self._is_vague(user_text) or fallback_gaps:
-                state.clarify += 1
-                clarify_key = fallback_gaps[0] if fallback_gaps else "severity"
-                clarify_label = GAP_LABELS.get(clarify_key, clarify_key)
-                try:
-                    self.repo.set_last_clarify_need(sid, item_id, clarify_label)
-                except Exception:  # pragma: no cover - runtime guard
-                    LOGGER.exception("Failed to persist clarify target for %s", sid)
-                clarify_prompt = pick_clarify(item_id, clarify_key)
-                self._persist_state(state)
-                return self._make_response(
-                    sid,
-                    state,
-                    clarify_prompt,
-                    turn_type="clarify",
-                    extra=extra_payload,
-                )
-
-        clarify_question = None
+        clarify_payload: Optional[Tuple[str, int, str]] = None
         if analysis_result and user_text and state.clarify < 2:
-            clarify_question = self._clarify_from_analysis(
+            clarify_payload = self._clarify_from_analysis(
                 state, analysis_result, dialogue
             )
 
-        if clarify_question:
+        if clarify_payload:
+            clarify_question, clarify_item_id, clarify_need = clarify_payload
+            if clarify_need:
+                try:
+                    self.repo.set_last_clarify_need(
+                        sid, clarify_item_id, clarify_need
+                    )
+                except Exception:  # pragma: no cover - runtime guard
+                    LOGGER.exception("Failed to persist clarify target for %s", sid)
             state.clarify += 1
             self._persist_state(state)
             return self._make_response(
@@ -978,17 +1005,6 @@ class LangGraphMini:
             LOGGER.warning("Invalid value for %s: %s; using default %s", name, raw, default)
             return default
 
-    @staticmethod
-    def _is_vague(text: str) -> bool:
-        if not text:
-            return False
-        normalized = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE).lower()
-        for phrase in VAGUE_PHRASES:
-            phrase_norm = re.sub(r"[\s\W]+", "", phrase, flags=re.UNICODE).lower()
-            if phrase_norm and phrase_norm in normalized:
-                return True
-        return False
-
     def _generate_opinion(
         self, existing_scores: List[Dict[str, Any]], new_score: Dict[str, Any]
     ) -> str:
@@ -1028,12 +1044,15 @@ class LangGraphMini:
         return dialogue
 
     def _run_deepseek_analysis(self, dialogue: List[Dict[str, Any]]) -> Optional[HAMDResult]:
-        if not dialogue or len(dialogue) < 4:
+        if not dialogue:
             return None
-        if not self.deepseek.enabled():
+        if not self.deepseek.usable():
             return None
         try:
             return self.deepseek.analyze(dialogue, get_prompt_hamd17())
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek analysis temporarily unavailable: %s", exc)
+            return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analysis skipped: %s", exc)
             return None
@@ -1068,7 +1087,7 @@ class LangGraphMini:
         state: SessionState,
         result: HAMDResult,
         dialogue: List[Dict[str, Any]],
-    ) -> Optional[str]:
+    ) -> Optional[Tuple[str, int, str]]:
         current_item = self._current_item_id(state)
         target = next(
             (
@@ -1079,18 +1098,13 @@ class LangGraphMini:
             None,
         )
         if target is None:
-            target = next(
-                (item for item in result.items if item.score_type == "类型4" and item.clarify_need),
-                None,
-            )
-        if target is None:
             return None
         clarify_need = target.clarify_need or ""
         evidence_text = "；".join(
             [entry.get("text", "") for entry in dialogue if entry.get("role") == "user"][-2:]
         )
         question = None
-        if self.deepseek.enabled():
+        if self.deepseek.usable():
             question = self.deepseek.gen_clarify_question(
                 target.item_id,
                 self.ITEM_NAMES.get(target.item_id, f"条目{target.item_id}"),
@@ -1099,7 +1113,7 @@ class LangGraphMini:
             )
         if not question:
             question = self.CLARIFY_FALLBACKS.get(clarify_need, "能再具体说说这个情况吗？")
-        return question
+        return question, target.item_id, clarify_need
 
 
 orchestrator = LangGraphMini()
