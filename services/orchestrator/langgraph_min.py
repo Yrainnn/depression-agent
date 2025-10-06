@@ -441,6 +441,13 @@ class LangGraphMini:
                 target_item = decision.current_item_id or item_id
             if target_item in (None, 0):
                 target_item = item_id
+            # 强制与量表顺序对齐：若控制器仍指向当前或更早条目，则推进到下一条
+            try:
+                target_int = int(target_item)
+            except (TypeError, ValueError):
+                target_int = item_id
+            if target_int <= item_id:
+                target_item = get_next_item(item_id)
             if target_item in (None, -1):
                 decision_action = "finish"
                 next_utt = COMPLETION_TEXT
