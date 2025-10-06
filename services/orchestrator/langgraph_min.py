@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -163,8 +164,8 @@ class LangGraphMini:
             return self._complete_payload(state, COMPLETION_TEXT)
 
         if not text and not audio_ref:
-            item = get_first_item()
-            question = pick_primary(item)
+            # 沿用当前条目，不要重置回首问
+            question = pick_primary(self._current_item_id(state))
             response = self._make_response(
                 sid,
                 state,
@@ -393,12 +394,43 @@ class LangGraphMini:
             target_item = forced_target or decision.current_item_id
             if target_item in (None, 0):
                 target_item = get_next_item(item_id)
+
+            # 末条护栏：已在最后一条且没有待澄清，直接完成
+            if item_id == TOTAL_ITEMS:
+                try:
+                    last_clarify = self.repo.get_last_clarify_need(sid)
+                except Exception:  # pragma: no cover
+                    last_clarify = None
+                no_pending_clarify = not last_clarify
+                if no_pending_clarify and (target_item in (None, 0, TOTAL_ITEMS)):
+                    state.completed = True
+                    state.index = TOTAL_ITEMS
+                    self._persist_state(state)
+                    try:
+                        self.repo.mark_finished(sid)
+                    except Exception:  # pragma: no cover - runtime guard
+                        LOGGER.exception("Failed to mark session %s finished", sid)
+                    try:
+                        self.repo.clear_last_clarify_need(sid)
+                    except Exception:  # pragma: no cover - runtime guard
+                        LOGGER.exception("Failed to clear clarify target for %s", sid)
+                    self._append_turn(
+                        sid,
+                        state,
+                        role="assistant",
+                        turn_type="ask",
+                        text=COMPLETION_TEXT,
+                    )
+                    return self._make_response(
+                        sid,
+                        state,
+                        COMPLETION_TEXT,
+                        turn_type="complete",
+                        extra={"analysis": state.analysis} if state.analysis else None,
+                        record=False,
+                    )
+
             self._advance_to(sid, target_item or item_id, state)
-            state.clarify = 0
-            try:
-                self.repo.clear_last_clarify_need(sid)
-            except Exception:  # pragma: no cover - runtime guard
-                LOGGER.exception("Failed to clear clarify target for %s", sid)
             self._append_turn(
                 sid,
                 state,
@@ -473,10 +505,17 @@ class LangGraphMini:
         }
         if previews:
             payload["segments_previews"] = previews
-        payload.setdefault("risk", None)
-        payload.setdefault("analysis", state.analysis)
+        payload["risk"] = payload.get("risk", None)
+        # 优先使用 extra.analysis，其次 state.analysis
+        if extra and "analysis" in extra:
+            payload["analysis"] = copy.deepcopy(extra["analysis"])
+        else:
+            payload["analysis"] = copy.deepcopy(state.analysis) if state.analysis else None
         if extra:
-            payload.update(extra)
+            for key, value in extra.items():
+                if key == "analysis":
+                    continue
+                payload[key] = value
         return payload
 
     def _emit_risk_event(self, sid: str, payload: Dict[str, Any]) -> None:
@@ -577,6 +616,11 @@ class LangGraphMini:
             state = self._load_state(sid)
         state.index = target
         state.clarify = 0
+        # 统一清理上一轮的 clarify 记录，避免遗留阻塞推进
+        try:
+            self.repo.clear_last_clarify_need(state.sid)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to clear clarify target for %s", state.sid)
         self._persist_state(state)
         return state
 
@@ -796,6 +840,43 @@ class LangGraphMini:
         response.update(payload)
         return response
 
+    def _analysis_from_scores(self, state: SessionState) -> Dict[str, Any]:
+        """根据已有的 scores_acc 生成一个轻量级 analysis 快照。"""
+        items: List[Dict[str, Any]] = []
+        scores_map = {score["item_id"]: score for score in state.scores_acc}
+        seq_list: List[str] = []
+        total = 0
+        for idx in range(1, TOTAL_ITEMS + 1):
+            key = f"H{idx:02d}"
+            score_entry = scores_map.get(key)
+            score_value = int(score_entry.get("score", 0)) if score_entry else 0
+            seq_list.append(str(score_value))
+            total += score_value
+            if not score_entry:
+                continue
+            items.append(
+                {
+                    "item_id": idx,
+                    "symptom_summary": score_entry.get("symptom_summary")
+                    or self.ITEM_NAMES.get(idx, f"条目{idx}"),
+                    "dialogue_evidence": score_entry.get("dialogue_evidence", "直接引用"),
+                    "evidence_refs": score_entry.get("evidence_refs", []),
+                    "score": score_value,
+                    "score_type": score_entry.get("score_type", "类型1"),
+                    "score_reason": score_entry.get("score_reason", ""),
+                    "clarify_need": score_entry.get("clarify_need"),
+                }
+            )
+        return {
+            "items": items,
+            "total_score": {
+                "得分序列": ",".join(seq_list),
+                "pre_correction_total": total,
+                "corrected_total": total,
+                "correction_basis": f"类型4条目数量N4=0，平均分X=0，修正总分=A+X×0={total}",
+            },
+        }
+
     def _complete_payload(self, state: SessionState, message: str) -> Dict[str, Any]:
         return self._make_response(
             state.sid,
@@ -828,6 +909,8 @@ class LangGraphMini:
             if score_result:
                 self._merge_scores(state, score_result["per_item_scores"])
                 state.opinion = score_result.get("opinion") or state.opinion
+                state.analysis = self._analysis_from_scores(state)
+                extra_payload["analysis"] = state.analysis
 
         active_clarify_need: Optional[str] = None
         if analysis_result:
@@ -881,14 +964,7 @@ class LangGraphMini:
 
         next_item = get_next_item(item_id)
         if next_item != -1:
-            state.index = next_item
-            self._persist_state(state)
-            try:
-                self.repo.clear_last_clarify_need(sid)
-            except Exception:  # pragma: no cover - runtime guard
-                LOGGER.exception(
-                    "Failed to clear clarify target after advancing for %s", sid
-                )
+            self._advance_to(sid, next_item, state)
             next_question = pick_primary(next_item)
             return self._make_response(
                 sid,
