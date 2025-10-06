@@ -649,9 +649,16 @@ class LangGraphMini:
         self,
         state: SessionState,
         transcripts: List[Dict[str, Any]],
+        dialogue: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not transcripts:
             return None
+
+        semantic_result = self._semantic_score_current_item(
+            state, transcripts, dialogue
+        )
+        if semantic_result:
+            return semantic_result
 
         item_id = self._current_item_id(state)
         question = pick_primary(item_id)
@@ -674,6 +681,70 @@ class LangGraphMini:
             "score": score,
             "max_score": MAX_SCORE.get(item_id, 4),
             "evidence_refs": evidence_refs,
+        }
+
+        opinion = self._generate_opinion(state.scores_acc, per_item_score)
+
+        return {
+            "per_item_scores": [per_item_score],
+            "opinion": opinion,
+        }
+
+    def _semantic_score_current_item(
+        self,
+        state: SessionState,
+        transcripts: List[Dict[str, Any]],
+        dialogue: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        if not self.deepseek.enabled():
+            return None
+
+        dialogue_payload = list(dialogue) if dialogue else self._build_dialogue_payload(
+            state.sid
+        )
+        if not dialogue_payload:
+            return None
+
+        try:
+            result = self.deepseek.analyze(dialogue_payload, get_prompt_hamd17())
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.debug(
+                "DeepSeek semantic scoring skipped for %s: %s", state.sid, exc
+            )
+            return None
+
+        item_id = self._current_item_id(state)
+        target = next((item for item in result.items if item.item_id == item_id), None)
+        if target is None:
+            return None
+
+        question = pick_primary(item_id)
+        latest_segment = next(
+            (
+                seg
+                for seg in reversed(transcripts)
+                if seg.get("speaker") == "patient" or seg.get("role") == "user"
+            ),
+            transcripts[-1],
+        )
+        evidence_refs = [ref for ref in target.evidence_refs if ref]
+        if not evidence_refs and latest_segment:
+            evidence_id = latest_segment.get("utt_id", "")
+            if evidence_id:
+                evidence_refs = [evidence_id]
+
+        per_item_score: Dict[str, Any] = {
+            "item_id": f"H{item_id:02d}",
+            "name": question,
+            "question": question,
+            "score": min(int(target.score), MAX_SCORE.get(item_id, 4)),
+            "max_score": MAX_SCORE.get(item_id, 4),
+            "evidence_refs": evidence_refs,
+            "score_type": target.score_type,
+            "score_reason": target.score_reason,
+            "dialogue_evidence": target.dialogue_evidence,
+            "symptom_summary": target.symptom_summary,
+            "clarify_need": target.clarify_need,
         }
 
         opinion = self._generate_opinion(state.scores_acc, per_item_score)
@@ -788,7 +859,7 @@ class LangGraphMini:
             self._store_analysis_scores(sid, state, analysis_result)
         else:
             state.analysis = None
-            score_result = self._score_current_item(state, scoring_segments)
+            score_result = self._score_current_item(state, scoring_segments, dialogue)
             if score_result:
                 self._merge_scores(state, score_result["per_item_scores"])
                 state.opinion = score_result.get("opinion") or state.opinion
