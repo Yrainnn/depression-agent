@@ -30,9 +30,38 @@ from services.tts.tts_adapter import TTSAdapter
 LOGGER = logging.getLogger(__name__)
 
 TOTAL_ITEMS = 17
-SAFE_RISK_TEXT = "我已检测到较高风险，现在优先关注您的安全，请您保持在线并联系身边可求助的人。"
+SAFE_RISK_TEXT = (
+    "我已检测到较高风险。请先确保自身安全：联系家人/朋友或当地紧急热线。如您确认“已经安全/无需帮助”，我将继续评估。"
+)
+RISK_HOLD_REMINDER_TEXT = (
+    "我注意到您可能仍处于风险关注阶段。如您已安全或无需立即帮助，请告诉我“已经安全/无需帮助”，我们就可以继续评估。"
+)
 MISSING_INPUT_PROMPT = "未获取音频/文本，请重新描述一次好吗？"
 COMPLETION_TEXT = "本次评估完成，感谢配合。稍后可下载报告。"
+
+RISK_RELEASE_PATTERNS = [
+    re.compile(pattern)
+    for pattern in [
+        r"已经安全",
+        r"已經安全",
+        r"没事",
+        r"沒事",
+        r"无需帮助",
+        r"無需幫助",
+        r"不需要.{0,4}帮助",
+        r"不用.{0,4}帮助",
+        r"不需要紧急帮助",
+        r"不需要立即帮助",
+        r"没有自杀想法",
+        r"沒有自殺想法",
+        r"没有自杀念头",
+        r"沒有自殺念頭",
+        r"没有想自杀",
+        r"沒有想自殺",
+        r"不会伤害自己",
+        r"不會傷害自己",
+    ]
+]
 
 VAGUE_PHRASES = [
     "还好",
@@ -63,6 +92,7 @@ class SessionState:
     analysis: Optional[Dict[str, Any]] = None
     controller_notice_logged: bool = False
     controller_unusable_turn: Optional[int] = None
+    risk_hold: bool = False
 
 
 class LangGraphMini:
@@ -178,6 +208,10 @@ class LangGraphMini:
             LOGGER.debug("Appended transcript for %s: %s", sid, segment)
 
         transcripts = self.repo.get_transcripts(sid)
+
+        hold_payload = self._handle_risk_hold(sid, state, prepared_segments)
+        if hold_payload is not None:
+            return hold_payload
 
         risk_payload = self._check_risk(sid, state, prepared_segments, transcripts)
         if risk_payload is not None:
@@ -435,6 +469,60 @@ class LangGraphMini:
             payload.update(extra)
         return payload
 
+    def _emit_risk_event(self, sid: str, payload: Dict[str, Any]) -> None:
+        try:
+            self.repo.push_risk_event_stream(sid, payload)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to push risk event to stream for %s", sid)
+        if hasattr(self.repo, "push_risk_event"):
+            self.repo.push_risk_event(sid, payload)
+        elif hasattr(self.repo, "append_risk_event"):
+            self.repo.append_risk_event(sid, payload)
+
+    def _handle_risk_hold(
+        self, sid: str, state: SessionState, segments: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if not state.risk_hold:
+            return None
+
+        combined_text = "".join(
+            str(segment.get("text") or "")
+            for segment in segments
+            if segment.get("role") in {None, "user"}
+            or segment.get("speaker") == "patient"
+        ).strip()
+
+        if combined_text:
+            release_hit = any(pattern.search(combined_text) for pattern in RISK_RELEASE_PATTERNS)
+            risk_snapshot = risk_engine.evaluate(combined_text)
+            if release_hit and risk_snapshot.level != "high":
+                state.risk_hold = False
+                release_payload: Dict[str, Any] = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "reason": "用户确认已安全，解除风险保持态",
+                    "match_text": combined_text,
+                    "phase": "release",
+                    "risk": {
+                        "level": "cleared",
+                        "triggers": [],
+                        "reason": "user_confirmed_safe",
+                    },
+                }
+                self._emit_risk_event(sid, release_payload)
+                self._persist_state(state)
+                return None
+
+        state.risk_hold = True
+        self._persist_state(state)
+        return self._make_response(
+            sid,
+            state,
+            RISK_HOLD_REMINDER_TEXT,
+            risk_flag=True,
+            turn_type="risk",
+            extra={"risk": {"level": "hold"}},
+        )
+
     def _append_turn(
         self,
         sid: str,
@@ -519,32 +607,34 @@ class LangGraphMini:
         transcripts: List[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
         for segment in segments:
-            if segment.get("role") not in {None, "user"}:
+            if segment.get("role") not in {None, "user"} and segment.get("speaker") != "patient":
                 continue
-            text = segment.get("text") or ""
-            if not text:
+            raw_text = segment.get("text")
+            if not raw_text:
                 continue
+            text = str(raw_text)
             risk = risk_engine.evaluate(text)
             if risk.level == "high":
                 now = datetime.now(timezone.utc).isoformat()
-                reason = "、".join(risk.triggers) if risk.triggers else "触发高风险关键词"
-                payload = {
+                reason = risk.reason or (
+                    "、".join(risk.triggers) if risk.triggers else "触发高风险关键词"
+                )
+                event_payload: Dict[str, Any] = {
                     "ts": now,
                     "reason": reason,
                     "match_text": text,
+                    "phase": "hold",
+                    "risk": {
+                        "level": risk.level,
+                        "triggers": risk.triggers,
+                        "reason": risk.reason,
+                    },
                 }
-                try:
-                    self.repo.push_risk_event_stream(sid, payload)
-                except Exception:  # pragma: no cover - runtime guard
-                    LOGGER.exception("Failed to push risk event to stream for %s", sid)
-                if hasattr(self.repo, "push_risk_event"):
-                    self.repo.push_risk_event(sid, payload)
-                elif hasattr(self.repo, "append_risk_event"):
-                    self.repo.append_risk_event(sid, payload)
-                state.completed = True
-                state.index = TOTAL_ITEMS
+                self._emit_risk_event(sid, event_payload)
+                state.risk_hold = True
+                self._persist_state(state)
                 LOGGER.info("Risk detected for %s: %s", sid, risk.triggers)
-                extra = {"risk": {"level": risk.level, "triggers": risk.triggers}}
+                extra = {"risk": event_payload["risk"]}
                 return self._make_response(
                     sid,
                     state,
@@ -815,6 +905,7 @@ class LangGraphMini:
         state.controller_unusable_turn = (
             int(controller_turn) if controller_turn is not None else None
         )
+        state.risk_hold = bool(raw.get("risk_hold", state.risk_hold))
         return state
 
     def _persist_state(self, state: SessionState) -> None:
@@ -832,6 +923,7 @@ class LangGraphMini:
                 "analysis": state.analysis,
                 "controller_notice_logged": state.controller_notice_logged,
                 "controller_unusable_turn": state.controller_unusable_turn,
+                "risk_hold": state.risk_hold,
             },
         )
 
