@@ -127,6 +127,20 @@ class LangGraphMini:
         }
 
     # ------------------------------------------------------------------
+    def _has_asked_any_primary(self, sid: str) -> bool:
+        """Return True if the session already contains an assistant 'ask' turn."""
+        try:
+            transcripts = self.repo.get_transcripts(sid)
+        except Exception:  # pragma: no cover - defensive guard
+            return False
+        for segment in transcripts or []:
+            role = segment.get("role") or segment.get("speaker")
+            turn_type = segment.get("type")
+            if role in {"assistant", "bot"} and turn_type == "ask":
+                return True
+        return False
+
+    # ------------------------------------------------------------------
     def ask(self, sid: str) -> Dict[str, object]:
         state = self._load_state(sid)
         if state.completed:
@@ -154,6 +168,8 @@ class LangGraphMini:
 
         if state.completed:
             return self._complete_payload(state, COMPLETION_TEXT)
+
+        asked_primary = self._has_asked_any_primary(sid)
 
         if not text and not audio_ref:
             # 沿用当前条目，不要重置回首问
@@ -203,6 +219,15 @@ class LangGraphMini:
         user_text = self._extract_user_text(prepared_segments)
         if user_text:
             state.last_text = user_text
+
+        if not asked_primary:
+            question = pick_primary(self._current_item_id(state))
+            return self._make_response(
+                sid,
+                state,
+                question,
+                turn_type="ask",
+            )
 
         item_id = self._current_item_id(state)
         scoring_segments = self._latest_segments(
@@ -295,17 +320,30 @@ class LangGraphMini:
             )
 
         if decision and decision.hamd_partial:
-            analysis_payload = decision.hamd_partial.model_dump()
-            state.analysis = analysis_payload
+            partial_payload = decision.hamd_partial.model_dump()
             try:
-                self.repo.merge_scores(sid, analysis_payload)
+                self.repo.merge_scores(sid, partial_payload)
             except Exception:  # pragma: no cover - runtime guard
                 LOGGER.exception("Failed to merge partial HAMD scores for %s", sid)
-            items_payload = analysis_payload.get("items")
-            if isinstance(items_payload, list):
-                state.scores_acc = items_payload
+            items_payload = partial_payload.get("items") or []
+            normalized_items = [
+                entry
+                for entry in (
+                    self._normalize_score_entry(item) for item in items_payload
+                )
+                if entry
+            ]
+            if normalized_items:
+                self._merge_scores(state, normalized_items)
+            total_payload = partial_payload.get("total_score") or {}
+            total_value = self._extract_total_score(total_payload)
+            if total_value is not None:
+                state.opinion = self._opinion_from_total(total_value)
+
+        if state.scores_acc:
+            state.analysis = self._analysis_from_scores(state)
         else:
-            analysis_payload = None
+            state.analysis = None
 
         if not decision:
             state.controller_unusable_turn = state.last_utt_index
@@ -319,9 +357,6 @@ class LangGraphMini:
                 transcripts=transcripts,
                 user_text=user_text,
             )
-
-        if analysis_payload:
-            state.analysis = analysis_payload
 
         if state.controller_unusable_turn is not None:
             state.controller_unusable_turn = None
@@ -403,7 +438,9 @@ class LangGraphMini:
         if decision_action == "ask":
             target_item = forced_target
             if target_item in (None, 0):
-                target_item = get_next_item(item_id)
+                target_item = decision.current_item_id or item_id
+            if target_item in (None, 0):
+                target_item = item_id
             if target_item in (None, -1):
                 decision_action = "finish"
                 next_utt = COMPLETION_TEXT
@@ -799,13 +836,110 @@ class LangGraphMini:
             "opinion": opinion,
         }
 
+    @staticmethod
+    def _extract_total_score(payload: Dict[str, Any]) -> Optional[int]:
+        for key in ("corrected_total", "pre_correction_total", "total"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _standardize_score_entry(
+        self, item_id: int, payload: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        base = dict(payload or {})
+        normalized = copy.deepcopy(base)
+        normalized["item_id"] = f"H{item_id:02d}"
+        normalized["name"] = normalized.get("name") or self.ITEM_NAMES.get(
+            item_id, f"条目{item_id}"
+        )
+        normalized["question"] = normalized.get("question") or pick_primary(item_id)
+        try:
+            score_value = int(normalized.get("score", 0))
+        except (TypeError, ValueError):
+            score_value = 0
+        max_score = MAX_SCORE.get(item_id, 4)
+        normalized["score"] = max(0, min(score_value, max_score))
+        normalized["max_score"] = max_score
+        normalized["evidence_refs"] = list(normalized.get("evidence_refs") or [])
+        normalized["dialogue_evidence"] = normalized.get("dialogue_evidence") or "直接引用"
+        normalized["symptom_summary"] = normalized.get("symptom_summary") or ""
+        normalized["score_type"] = normalized.get("score_type") or "类型1"
+        normalized["score_reason"] = normalized.get("score_reason") or ""
+        clarify_need = normalized.get("clarify_need")
+        normalized["clarify_need"] = clarify_need if clarify_need not in {"", None} else None
+        return normalized
+
+    def _normalize_score_entry(
+        self, payload: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return None
+        raw_id = payload.get("item_id")
+        item_id: Optional[int]
+        if isinstance(raw_id, int):
+            item_id = raw_id
+        elif isinstance(raw_id, str):
+            stripped = raw_id.strip().upper()
+            if stripped.startswith("H"):
+                stripped = stripped[1:]
+            if not stripped:
+                return None
+            try:
+                item_id = int(stripped)
+            except ValueError:
+                return None
+        else:
+            try:
+                item_id = int(raw_id)
+            except (TypeError, ValueError):
+                return None
+        if not (1 <= item_id <= TOTAL_ITEMS):
+            return None
+        return self._standardize_score_entry(item_id, payload)
+
     def _merge_scores(self, state: SessionState, new_scores: List[Dict[str, Any]]) -> None:
-        scores_by_id = {score["item_id"]: score for score in state.scores_acc}
+        scores_by_id: Dict[str, Dict[str, Any]] = {}
+        for existing in state.scores_acc:
+            normalized = self._normalize_score_entry(existing)
+            if not normalized:
+                continue
+            scores_by_id[normalized["item_id"]] = normalized
+
+        def score_value(entry: Dict[str, Any]) -> int:
+            try:
+                return int(entry.get("score", 0))
+            except (TypeError, ValueError):
+                return 0
+
         for score in new_scores:
-            item_id = score["item_id"]
-            existing = scores_by_id.get(item_id)
-            if existing is None or score.get("score", 0) >= existing.get("score", 0):
-                scores_by_id[item_id] = score
+            normalized = self._normalize_score_entry(score)
+            if not normalized:
+                continue
+            key = normalized["item_id"]
+            current = scores_by_id.get(key)
+            if current is None:
+                scores_by_id[key] = normalized
+                continue
+            existing_value = score_value(current)
+            candidate_value = score_value(normalized)
+            if candidate_value > existing_value:
+                scores_by_id[key] = normalized
+            elif candidate_value == existing_value:
+                current_refs = len(current.get("evidence_refs") or [])
+                candidate_refs = len(normalized.get("evidence_refs") or [])
+                if candidate_refs > current_refs:
+                    scores_by_id[key] = normalized
+                elif candidate_refs == current_refs:
+                    current_summary = current.get("symptom_summary") or ""
+                    candidate_summary = normalized.get("symptom_summary") or ""
+                    if not current_summary and candidate_summary:
+                        scores_by_id[key] = normalized
+
         ordered: List[Dict[str, Any]] = []
         for idx in range(1, TOTAL_ITEMS + 1):
             key = f"H{idx:02d}"
@@ -858,18 +992,34 @@ class LangGraphMini:
 
     def _analysis_from_scores(self, state: SessionState) -> Dict[str, Any]:
         """根据已有的 scores_acc 生成一个轻量级 analysis 快照。"""
-        items: List[Dict[str, Any]] = []
-        scores_map = {score["item_id"]: score for score in state.scores_acc}
+        normalized_scores: List[Dict[str, Any]] = []
+        for entry in state.scores_acc:
+            normalized = self._normalize_score_entry(entry)
+            if normalized:
+                normalized_scores.append(normalized)
+        state.scores_acc = normalized_scores
+
+        scores_map = {score["item_id"]: score for score in normalized_scores}
         seq_list: List[str] = []
+        items: List[Dict[str, Any]] = []
         total = 0
+        type4_count = 0
         for idx in range(1, TOTAL_ITEMS + 1):
             key = f"H{idx:02d}"
             score_entry = scores_map.get(key)
-            score_value = int(score_entry.get("score", 0)) if score_entry else 0
+            if score_entry:
+                try:
+                    score_value = int(score_entry.get("score", 0))
+                except (TypeError, ValueError):
+                    score_value = 0
+            else:
+                score_value = 0
             seq_list.append(str(score_value))
             total += score_value
             if not score_entry:
                 continue
+            if score_entry.get("score_type") == "类型4":
+                type4_count += 1
             items.append(
                 {
                     "item_id": idx,
@@ -883,13 +1033,19 @@ class LangGraphMini:
                     "clarify_need": score_entry.get("clarify_need"),
                 }
             )
+
+        avg = total / type4_count if type4_count else 0
+        correction_basis = (
+            f"类型4条目数量N4={type4_count}，平均分X={avg:.2f}，修正总分=A+X×N4={total}"
+        )
+
         return {
             "items": items,
             "total_score": {
                 "得分序列": ",".join(seq_list),
                 "pre_correction_total": total,
                 "corrected_total": total,
-                "correction_basis": f"类型4条目数量N4=0，平均分X=0，修正总分=A+X×0={total}",
+                "correction_basis": correction_basis,
             },
         }
 
@@ -916,9 +1072,6 @@ class LangGraphMini:
         extra_payload: Dict[str, Any] = {}
 
         if analysis_result:
-            analysis_dict = analysis_result.model_dump()
-            state.analysis = analysis_dict
-            extra_payload["analysis"] = analysis_dict
             self._store_analysis_scores(sid, state, analysis_result)
         else:
             score_result = self._score_current_item(state, scoring_segments, dialogue)
@@ -926,7 +1079,11 @@ class LangGraphMini:
                 self._merge_scores(state, score_result["per_item_scores"])
                 state.opinion = score_result.get("opinion") or state.opinion
                 state.analysis = self._analysis_from_scores(state)
-                extra_payload["analysis"] = state.analysis
+
+        if state.analysis is not None:
+            extra_payload["analysis"] = copy.deepcopy(state.analysis)
+        else:
+            extra_payload["analysis"] = None
 
         active_clarify_need: Optional[str] = None
         if analysis_result:
@@ -1152,22 +1309,42 @@ class LangGraphMini:
     def _store_analysis_scores(
         self, sid: str, state: SessionState, result: HAMDResult
     ) -> None:
-        items = []
+        normalized_items: List[Dict[str, Any]] = []
         for item in result.items:
-            items.append(
+            normalized = self._normalize_score_entry(
                 {
-                    "item_id": f"H{item.item_id:02d}",
-                    "name": self.ITEM_NAMES.get(item.item_id, f"条目{item.item_id}"),
-                    "question": pick_primary(item.item_id),
+                    "item_id": item.item_id,
                     "score": item.score,
                     "max_score": MAX_SCORE.get(item.item_id, 4),
                     "evidence_refs": item.evidence_refs,
                     "score_type": item.score_type,
                     "score_reason": item.score_reason,
+                    "dialogue_evidence": getattr(item, "dialogue_evidence", None),
+                    "symptom_summary": getattr(item, "symptom_summary", None),
                     "clarify_need": item.clarify_need,
                 }
             )
-        state.scores_acc = items
+            if normalized:
+                normalized_items.append(normalized)
+
+        if normalized_items:
+            self._merge_scores(state, normalized_items)
+
+        analysis_snapshot = (
+            self._analysis_from_scores(state) if state.scores_acc else {}
+        )
+        summary = getattr(result, "summary", None)
+        if summary:
+            analysis_snapshot = dict(analysis_snapshot or {})
+            analysis_snapshot["summary"] = summary
+        state.analysis = analysis_snapshot or None
+
+        if state.analysis:
+            total_payload = state.analysis.get("total_score") or {}
+            total_value = self._extract_total_score(total_payload)
+            if total_value is not None:
+                state.opinion = state.opinion or self._opinion_from_total(total_value)
+
         try:
             repository.save_scores(sid, result.model_dump())
         except Exception:  # pragma: no cover - runtime guard
