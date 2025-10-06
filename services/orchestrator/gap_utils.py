@@ -1,6 +1,7 @@
 """Utilities for detecting missing information in HAMD-17 dialogues."""
 from __future__ import annotations
 
+import re
 from typing import Dict, Iterable, List, Optional
 
 # Mapping between internal gap keys and the labels used in clarify prompts.
@@ -65,7 +66,7 @@ def detect_information_gaps(text: Optional[str], item_id: Optional[int] = None) 
     ):
         gaps.append("severity")
 
-    if _contains_any(lowered, ("没有", "不", "无")):
+    if _has_explicit_negation(lowered):
         gaps.append("negation")
 
     if item_id == 3:
@@ -75,6 +76,32 @@ def detect_information_gaps(text: Optional[str], item_id: Optional[int] = None) 
             gaps.insert(0, "plan")
 
     return gaps
+
+
+def _has_explicit_negation(text: str) -> bool:
+    """Return True when the response explicitly denies the symptom."""
+
+    if not text:
+        return False
+
+    patterns = [
+        r"没有",
+        r"並不",
+        r"并不",
+        r"不再",
+        r"不太",
+        r"不怎",
+        r"不需要",
+        r"不想",
+        r"不必",
+        r"不会",
+        r"无需",
+        r"不用",
+        r"未(?:曾|有|发生|出现)",
+        r"从未",
+        r"否认",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 __all__ = ["GAP_LABELS", "detect_information_gaps"]
