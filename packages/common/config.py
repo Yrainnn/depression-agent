@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     prompt_mdd_judgment_path: Optional[str] = Field(None, alias="PROMPT_MDD_JUDGMENT_PATH")
     prompt_clarify_cn_path: Optional[str] = Field(None, alias="PROMPT_CLARIFY_CN_PATH")
     enable_ds_controller: bool = Field(True, alias="ENABLE_DS_CONTROLLER")
+    deepseek_chat_timeout: float = Field(90.0, alias="DEEPSEEK_CHAT_TIMEOUT")
+    deepseek_clarify_timeout: float = Field(60.0, alias="DEEPSEEK_CLARIFY_TIMEOUT")
+    deepseek_controller_timeout: float = Field(90.0, alias="DEEPSEEK_CONTROLLER_TIMEOUT")
     alibaba_cloud_access_key_id: Optional[str] = Field(
         None, alias="ALIBABA_CLOUD_ACCESS_KEY_ID"
     )
@@ -137,6 +140,18 @@ class Settings(BaseSettings):
     @property
     def ENABLE_DS_CONTROLLER(self) -> bool:
         return self.enable_ds_controller
+
+    @property
+    def DEEPSEEK_CHAT_TIMEOUT(self) -> float:
+        return self.deepseek_chat_timeout
+
+    @property
+    def DEEPSEEK_CLARIFY_TIMEOUT(self) -> float:
+        return self.deepseek_clarify_timeout
+
+    @property
+    def DEEPSEEK_CONTROLLER_TIMEOUT(self) -> float:
+        return self.deepseek_controller_timeout
 
     class Config:
         env_file = ".env"
