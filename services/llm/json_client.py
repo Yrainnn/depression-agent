@@ -124,7 +124,7 @@ class DeepSeekJSONClient:
         response_format: Optional[dict] = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
-        timeout: float = 20.0,
+        timeout: float = 45.0,
     ) -> str:
         if not self.enabled():  # pragma: no cover - guard rail
             raise RuntimeError("DeepSeek client not configured")
@@ -319,7 +319,7 @@ class DeepSeekJSONClient:
                 response_format=None,
                 max_tokens=64,
                 temperature=0.2,
-                timeout=15,
+                timeout=30,
             )
             text = (content or "").strip()
             for end in ["？", "。", "!", "！", "?"]:
@@ -361,7 +361,7 @@ class DeepSeekJSONClient:
             response_format={"type": "json_object"},
             max_tokens=2048,
             temperature=0.2,
-            timeout=25,
+            timeout=45,
         )
         data = json.loads(content)
         return ControllerDecision.model_validate(data)
