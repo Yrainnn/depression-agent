@@ -824,7 +824,6 @@ class LangGraphMini:
             extra_payload["analysis"] = analysis_dict
             self._store_analysis_scores(sid, state, analysis_result)
         else:
-            state.analysis = None
             score_result = self._score_current_item(state, scoring_segments, dialogue)
             if score_result:
                 self._merge_scores(state, score_result["per_item_scores"])
@@ -1098,11 +1097,6 @@ class LangGraphMini:
             ),
             None,
         )
-        if target is None:
-            target = next(
-                (item for item in result.items if item.score_type == "类型4" and item.clarify_need),
-                None,
-            )
         if target is None:
             return None
         clarify_need = target.clarify_need or ""
