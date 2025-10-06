@@ -19,9 +19,14 @@ class _RequestError(Exception):
     pass
 
 
+class _ReadTimeout(_RequestError):
+    pass
+
+
 httpx_stub.Client = object
 httpx_stub.HTTPStatusError = _HTTPStatusError
 httpx_stub.RequestError = _RequestError
+httpx_stub.ReadTimeout = _ReadTimeout
 sys.modules.setdefault("httpx", httpx_stub)
 
 config_stub = types.ModuleType("packages.common.config")
@@ -30,6 +35,9 @@ config_stub = types.ModuleType("packages.common.config")
 class _Settings:
     deepseek_api_base: str | None = None
     deepseek_api_key: str | None = None
+    deepseek_chat_timeout: float = 90.0
+    deepseek_clarify_timeout: float = 60.0
+    deepseek_controller_timeout: float = 90.0
 
 
 config_stub.settings = _Settings()
@@ -91,7 +99,10 @@ sys.modules.setdefault("tenacity", tenacity_stub)
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from services.llm.json_client import DeepSeekJSONClient
+from services.llm.json_client import (
+    DeepSeekJSONClient,
+    DeepSeekTemporarilyUnavailableError,
+)
 
 
 class _DummyResponse:
@@ -139,3 +150,16 @@ def test_post_chat_normalizes_deepseek_base(monkeypatch: pytest.MonkeyPatch, bas
 
     assert result == "{}"
     assert captured == ["https://api.deepseek.com/v1/chat/completions"]
+
+
+def test_post_chat_respects_circuit_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _client_factory(*args, **kwargs):  # pragma: no cover - guard
+        raise AssertionError("httpx.Client should not be constructed when circuit is open")
+
+    monkeypatch.setattr("services.llm.json_client.httpx.Client", _client_factory)
+
+    client = DeepSeekJSONClient(base="https://api.deepseek.com/v1", key="test-key", model="dummy")
+    client._trip_circuit(duration=10)
+
+    with pytest.raises(DeepSeekTemporarilyUnavailableError):
+        client._post_chat(messages=[{"role": "user", "content": "hi"}])
