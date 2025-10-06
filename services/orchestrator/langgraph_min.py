@@ -30,6 +30,7 @@ from services.orchestrator.questions_hamd17 import (
 )
 from services.risk.engine import engine as risk_engine
 from services.store.repository import repository
+from services.report.build import build_pdf
 from services.tts.tts_adapter import TTSAdapter
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,16 @@ RISK_HOLD_REMINDER_TEXT = (
 )
 MISSING_INPUT_PROMPT = "未获取音频/文本，请重新描述一次好吗？"
 COMPLETION_TEXT = "本次评估完成，感谢配合。稍后可下载报告。"
+
+REPORT_REQUEST_PATTERNS = [
+    re.compile(pattern)
+    for pattern in [
+        r"(获取|生成|下载|查看|打印|要|想要).{0,6}报告",
+        r"报告.{0,6}(怎么|如何|咋|怎样).{0,4}(获取|生成|下载)",
+        r"出一份报告",
+        r"报告给我",
+    ]
+]
 
 RISK_RELEASE_PATTERNS = [
     re.compile(pattern)
@@ -219,6 +230,10 @@ class LangGraphMini:
         user_text = self._extract_user_text(prepared_segments)
         if user_text:
             state.last_text = user_text
+
+        report_payload = self._maybe_handle_report_request(sid, state, user_text)
+        if report_payload is not None:
+            return report_payload
 
         if not asked_primary:
             question = pick_primary(self._current_item_id(state))
@@ -576,6 +591,113 @@ class LangGraphMini:
                 if key == "analysis":
                     continue
                 payload[key] = value
+        return payload
+
+    def _maybe_handle_report_request(
+        self, sid: str, state: SessionState, user_text: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        if not user_text:
+            return None
+
+        normalized = user_text.strip()
+        if not normalized:
+            return None
+
+        lowered = normalized.lower()
+        matched = any(
+            pattern.search(normalized) or pattern.search(lowered)
+            for pattern in REPORT_REQUEST_PATTERNS
+        )
+        if not matched:
+            return None
+
+        self._persist_state(state)
+
+        score_payload = self._prepare_report_scores(sid, state)
+        question = pick_primary(self._current_item_id(state))
+
+        if not score_payload:
+            message = f"当前暂无足够信息生成报告，我们先继续评估：{question}"
+            return self._make_response(
+                sid,
+                state,
+                message,
+                turn_type="ask",
+                extra={"report_generated": False},
+            )
+
+        try:
+            report_result = build_pdf(sid, score_payload)
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to build report for %s: %s", sid, exc)
+            message = f"生成报告时遇到问题，我们继续当前评估：{question}"
+            return self._make_response(
+                sid,
+                state,
+                message,
+                turn_type="ask",
+                extra={"report_generated": False},
+            )
+
+        report_url = (
+            report_result.get("report_url")
+            if isinstance(report_result, dict)
+            else None
+        )
+        if not report_url:
+            message = f"暂时无法提供下载链接，我们先继续评估：{question}"
+            return self._make_response(
+                sid,
+                state,
+                message,
+                turn_type="ask",
+                extra={"report_generated": False},
+            )
+
+        message = f"已为您生成评估报告，可通过此链接下载：{report_url}。我们继续：{question}"
+        extra = {"report_generated": True, "report_url": report_url}
+        if state.analysis:
+            extra["analysis"] = state.analysis
+        return self._make_response(
+            sid,
+            state,
+            message,
+            turn_type="ask",
+            extra=extra,
+        )
+
+    def _prepare_report_scores(
+        self, sid: str, state: SessionState
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            stored_scores = self.repo.load_scores(sid)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to load stored scores for %s", sid)
+            stored_scores = None
+
+        payload: Dict[str, Any] = {}
+        if isinstance(stored_scores, dict):
+            payload.update(copy.deepcopy(stored_scores))
+        elif isinstance(stored_scores, list):
+            payload["items"] = copy.deepcopy(stored_scores)
+
+        if state.scores_acc:
+            payload.setdefault("items", copy.deepcopy(state.scores_acc))
+
+        if state.analysis and isinstance(state.analysis, dict):
+            total_block = state.analysis.get("total_score")
+            if total_block:
+                payload.setdefault("total_score", copy.deepcopy(total_block))
+
+        if state.opinion:
+            if isinstance(payload.get("opinion"), dict):
+                payload["opinion"].setdefault("summary", state.opinion)
+            else:
+                payload["opinion"] = {"summary": state.opinion}
+
+        if not payload.get("items") and not payload.get("per_item_scores"):
+            return None
+
         return payload
 
     def _emit_risk_event(self, sid: str, payload: Dict[str, Any]) -> None:

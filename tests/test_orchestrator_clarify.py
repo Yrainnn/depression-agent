@@ -18,6 +18,40 @@ sys.modules.setdefault("aliyunsdkcore", _aliyun)
 sys.modules.setdefault("aliyunsdkcore.client", _aliyun_client)
 sys.modules.setdefault("aliyunsdkcore.request", _aliyun_request)
 
+_jinja2 = types.ModuleType("jinja2")
+
+
+class _FakeTemplate:
+    def render(self, **_: Any) -> str:
+        return ""
+
+
+class _FakeEnv:
+    def __init__(self, *_: Any, **__: Any) -> None:
+        pass
+
+    def from_string(self, _template: str) -> _FakeTemplate:
+        return _FakeTemplate()
+
+
+_jinja2.Environment = lambda *args, **kwargs: _FakeEnv(*args, **kwargs)
+_jinja2.select_autoescape = lambda *args, **kwargs: None
+sys.modules.setdefault("jinja2", _jinja2)
+
+_weasyprint = types.ModuleType("weasyprint")
+
+
+class _FakeHTML:
+    def __init__(self, *_: Any, **__: Any) -> None:
+        pass
+
+    def write_pdf(self, _path: str) -> None:
+        return None
+
+
+_weasyprint.HTML = lambda *args, **kwargs: _FakeHTML(*args, **kwargs)
+sys.modules.setdefault("weasyprint", _weasyprint)
+
 packages_stub = types.ModuleType("packages")
 common_stub = types.ModuleType("packages.common")
 config_stub = types.ModuleType("packages.common.config")
