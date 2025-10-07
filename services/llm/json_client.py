@@ -149,34 +149,10 @@ class DeepSeekJSONClient:
             LOGGER.warning(
                 "DeepSeek API base %s should include the /v1 suffix; requests will "
                 "append it automatically",
-                trimmed_base,
+                url_base,
             )
             self._warned_bad_base = True
-        split = urlsplit(url_base)
-        path = (split.path or "").rstrip("/")
-        if path.endswith("/chat/completions"):
-            path = path[: -len("/chat/completions")]
-            path = path.rstrip("/")
-        if path.endswith("/v1"):
-            path = path[: -len("/v1")]
-        normalized_path = path.rstrip("/")
-        if normalized_path:
-            final_path = f"{normalized_path}/v1/chat/completions"
-        else:
-            final_path = "/v1/chat/completions"
-        if not final_path.startswith("/"):
-            final_path = "/" + final_path
-        if split.scheme and split.netloc:
-            url = urlunsplit((split.scheme, split.netloc, final_path, "", ""))
-        else:
-            fallback_base = trimmed_base.rstrip("/")
-            if fallback_base.endswith("/chat/completions"):
-                fallback_base = fallback_base[: -len("/chat/completions")]
-                fallback_base = fallback_base.rstrip("/")
-            if fallback_base.endswith("/v1"):
-                fallback_base = fallback_base[: -len("/v1")]
-            fallback_base = fallback_base.rstrip("/")
-            url = fallback_base + "/v1/chat/completions"
+        url = url_base + "/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
