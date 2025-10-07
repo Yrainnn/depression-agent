@@ -31,7 +31,7 @@ def test_tts_adapter_uses_stub_when_dashscope_unavailable(tmp_path, monkeypatch)
         assert wav_file.getframerate() == 16000
 
 
-def test_tts_adapter_invokes_injected_factory_and_reuses_synth(tmp_path):
+def test_tts_adapter_invokes_injected_factory_for_each_call(tmp_path):
     calls = []
     creations = []
     instances = []
@@ -78,9 +78,13 @@ def test_tts_adapter_invokes_injected_factory_and_reuses_synth(tmp_path):
             assert wav_file.getnchannels() == 1
             assert wav_file.getnframes() > 0
 
-    assert creations == [("cosyvoice-v2", "custom_voice", "wav")]
-    assert len(instances) == 1
+    assert creations == [
+        ("cosyvoice-v2", "custom_voice", "wav"),
+        ("cosyvoice-v2", "custom_voice", "wav"),
+    ]
+    assert len(instances) == 2
     assert calls and len(calls) == 2
     assert calls[0]["voice"] == "custom_voice"
     assert calls[0]["kwargs"].get("format") == "wav"
-    assert calls[1]["call_count"] == 2
+    assert calls[0]["call_count"] == 1
+    assert calls[1]["call_count"] == 1
