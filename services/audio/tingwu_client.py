@@ -81,6 +81,18 @@ def _stop_task(task_id: str):
     return json.loads(client.do_action_with_exception(req))
 
 
+def create_realtime_task():
+    """Create a Tingwu realtime task and return its WS join URL + task id."""
+
+    return _create_task()
+
+
+def stop_realtime_task(task_id: str):
+    """Stop a Tingwu realtime task given its id."""
+
+    _stop_task(task_id)
+
+
 class TingwuRealtimeClient:
     def __init__(self, audio_file: str):
         self.audio_file = audio_file
