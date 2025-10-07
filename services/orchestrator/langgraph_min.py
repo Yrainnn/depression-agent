@@ -94,7 +94,6 @@ class SessionState:
     analysis: Optional[Dict[str, Any]] = None
     controller_notice_logged: bool = False
     controller_unusable_turn: Optional[int] = None
-    risk_hold: bool = False
 
 
 class LangGraphMini:
@@ -252,20 +251,14 @@ class LangGraphMini:
         dialogue_payload = self._build_dialogue_payload(sid)
         current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
-        controller_enabled = (
-            settings.ENABLE_DS_CONTROLLER and self.deepseek.usable()
-        )
+        controller_enabled = settings.ENABLE_DS_CONTROLLER and self.deepseek.enabled()
 
         if not controller_enabled:
             if not state.controller_notice_logged:
                 reason = (
                     "disabled via settings"
                     if not settings.ENABLE_DS_CONTROLLER
-                    else (
-                        "client not configured"
-                        if not self.deepseek.enabled()
-                        else "temporarily unavailable"
-                    )
+                    else "client not configured"
                 )
                 LOGGER.info("DeepSeek controller unavailable for %s: %s", sid, reason)
                 state.controller_notice_logged = True
@@ -302,20 +295,6 @@ class LangGraphMini:
         decision: Optional[ControllerDecision] = None
         try:
             decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
-        except DeepSeekTemporarilyUnavailableError as exc:
-            LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
-            state.controller_notice_logged = True
-            state.controller_unusable_turn = state.last_utt_index
-            self._persist_state(state)
-            return self._fallback_flow(
-                sid=sid,
-                state=state,
-                item_id=item_id,
-                scoring_segments=scoring_segments,
-                dialogue=dialogue_payload,
-                transcripts=transcripts,
-                user_text=user_text,
-            )
         except Exception as exc:  # pragma: no cover - runtime guard
             log_method = LOGGER.warning
             if state.controller_notice_logged:
@@ -372,6 +351,10 @@ class LangGraphMini:
                 transcripts=transcripts,
                 user_text=user_text,
             )
+
+        if state.controller_unusable_turn is not None:
+            state.controller_unusable_turn = None
+            self._persist_state(state)
 
         if state.controller_unusable_turn is not None:
             state.controller_unusable_turn = None
@@ -1286,7 +1269,21 @@ class LangGraphMini:
 
     def _make_tts(self, sid: str, text: str) -> str:
         try:
-            return self.tts.synthesize(sid, text)
+            url = self.tts.synthesize(sid, text)
+            if getattr(self.tts, "last_upload", None):
+                try:
+                    self.repo.save_oss_reference(
+                        sid,
+                        {
+                            "type": "tts",
+                            "url": self.tts.last_upload.get("url"),
+                            "oss_key": self.tts.last_upload.get("oss_key"),
+                            "text": text,
+                        },
+                    )
+                except Exception:  # pragma: no cover - repository guard
+                    LOGGER.exception("Failed to persist TTS OSS reference for %s", sid)
+            return url
         except Exception:
             LOGGER.exception("TTS synthesis failed for %s", sid)
             return ""
@@ -1310,7 +1307,6 @@ class LangGraphMini:
         state.controller_unusable_turn = (
             int(controller_turn) if controller_turn is not None else None
         )
-        state.risk_hold = bool(raw.get("risk_hold", state.risk_hold))
         return state
 
     def _persist_state(self, state: SessionState) -> None:
@@ -1328,7 +1324,6 @@ class LangGraphMini:
                 "analysis": state.analysis,
                 "controller_notice_logged": state.controller_notice_logged,
                 "controller_unusable_turn": state.controller_unusable_turn,
-                "risk_hold": state.risk_hold,
             },
         )
 
