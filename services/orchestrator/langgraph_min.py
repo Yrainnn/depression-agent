@@ -360,6 +360,10 @@ class LangGraphMini:
             state.controller_unusable_turn = None
             self._persist_state(state)
 
+        if state.controller_unusable_turn is not None:
+            state.controller_unusable_turn = None
+            self._persist_state(state)
+
         extra: Dict[str, Any] = {}
         if state.analysis:
             extra["analysis"] = state.analysis

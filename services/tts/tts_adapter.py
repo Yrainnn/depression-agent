@@ -6,9 +6,24 @@ import time
 import uuid
 import wave
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from services.oss import OSSUploader, OSSUploaderError
+
+
+def _discover_dashscope() -> Tuple[Optional[Any], Optional[type]]:
+    try:
+        import dashscope  # type: ignore[import-not-found]
+    except ImportError:
+        LOGGER.debug("DashScope SDK not available; using stub TTS pipeline")
+        return None, None
+
+    speech_cls = getattr(dashscope, "SpeechSynthesizer", None)
+    if speech_cls is None:
+        LOGGER.debug("DashScope SpeechSynthesizer missing; falling back to stub")
+        return dashscope, None
+
+    return dashscope, speech_cls
 
 LOGGER = logging.getLogger(__name__)
 SR = 16000
@@ -47,6 +62,7 @@ class TTSAdapter:
         self.uploader = uploader or OSSUploader()
         self.oss_prefix = oss_prefix
         self.last_upload: Optional[Dict[str, str]] = None
+        self._dashscope_module, self._dashscope_synth_cls = _discover_dashscope()
 
     def _write_silence_wav(self, path: Path, seconds: float = 1.0) -> None:
         frames = int(SR * seconds)
