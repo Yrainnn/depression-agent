@@ -74,6 +74,17 @@ class DeepSeekJSONClient:
         self.base = base or settings.deepseek_api_base
         self.key = key or settings.deepseek_api_key
         self.model = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self._warned_bad_base = False
+        trimmed_base = (self.base or "").rstrip("/")
+        if trimmed_base and not trimmed_base.endswith("/v1"):
+            LOGGER.warning(
+                "DEEPSEEK_API_BASE should target the OpenAI-compatible /v1 host; "
+                "currently=%s",
+                self.base,
+            )
+            self._warned_bad_base = True
+        if not self.key:
+            LOGGER.warning("DeepSeek client initialised without an API key")
 
     def enabled(self) -> bool:
         return bool(self.base and self.key)
@@ -91,7 +102,15 @@ class DeepSeekJSONClient:
         if not self.enabled():  # pragma: no cover - guard rail
             raise RuntimeError("DeepSeek client not configured")
 
-        url = self.base.rstrip("/") + "/v1/chat/completions"
+        url_base = (self.base or "").rstrip("/")
+        if not self._warned_bad_base and url_base and not url_base.endswith("/v1"):
+            LOGGER.warning(
+                "DeepSeek API base %s should include the /v1 suffix; requests will "
+                "append it automatically",
+                url_base,
+            )
+            self._warned_bad_base = True
+        url = url_base + "/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
@@ -106,8 +125,22 @@ class DeepSeekJSONClient:
             payload["response_format"] = response_format
 
         with httpx.Client(timeout=timeout) as client:
-            response = client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
+            try:
+                response = client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code if exc.response else "?"
+                text_preview = exc.response.text if exc.response else ""
+                if len(text_preview) > 500:
+                    text_preview = text_preview[:500] + "…"
+                LOGGER.error(
+                    "DeepSeek chat request failed with status %s: %s", status, text_preview
+                )
+                raise
+            except httpx.RequestError as exc:
+                LOGGER.error("DeepSeek chat request errored: %s", exc)
+                raise
+
             data = response.json()
             return data["choices"][0]["message"]["content"]
 
