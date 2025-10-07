@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     oss_endpoint: Optional[str] = Field(None, alias="OSS_ENDPOINT")
     oss_bucket: Optional[str] = Field(None, alias="OSS_BUCKET")
     oss_prefix: str = Field("", alias="OSS_PREFIX")
+    oss_region: Optional[str] = Field(None, alias="OSS_REGION")
     oss_access_key_id: Optional[str] = Field(None, alias="OSS_ACCESS_KEY_ID")
     oss_access_key_secret: Optional[str] = Field(None, alias="OSS_ACCESS_KEY_SECRET")
     oss_public_base_url: Optional[str] = Field(None, alias="OSS_BASE_URL")
@@ -210,6 +211,10 @@ class Settings(BaseSettings):
     @property
     def OSS_PREFIX(self) -> str:
         return self.oss_prefix
+
+    @property
+    def OSS_REGION(self) -> Optional[str]:
+        return self.oss_region
 
     @property
     def OSS_ACCESS_KEY_ID(self) -> Optional[str]:

@@ -5,6 +5,7 @@ gradio
 python-dotenv
 pydantic>=2.6.0
 requests
+alibabacloud-oss-v2>=1.0.0
 jinja2
 weasyprint
 redis

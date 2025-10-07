@@ -198,9 +198,8 @@ class TTSAdapter:
         self,
         sid: str,
         path: Path,
-        *,
-        text: Optional[str],
-        voice: Optional[str],
+        text: Optional[str] = None,
+        voice: Optional[str] = None,
     ) -> Optional[str]:
         client = self.oss_client
         if client is None or not getattr(client, "enabled", False):
@@ -217,35 +216,6 @@ class TTSAdapter:
             path,
             metadata=metadata,
         )
-        return url
-
-    def _upload_to_oss(self, sid: str, file_path: Path) -> Optional[str]:
-        if not self.uploader.enabled:
-            self.last_upload = None
-            return None
-
-        base_prefix = self.oss_prefix.rstrip("/")
-        prefix = f"{base_prefix}/{sid}/" if base_prefix else f"{sid}/"
-        try:
-            oss_key = self.uploader.upload_file(str(file_path), oss_key_prefix=prefix)
-            url = self.uploader.get_presigned_url(oss_key, expires_minutes=24 * 60)
-            self.last_upload = {"oss_key": oss_key, "url": url}
-        except (OSError, OSSUploaderError) as exc:
-            LOGGER.warning("Failed to upload TTS result for %s: %s", sid, exc)
-            self.last_upload = None
-            return None
-        except Exception:  # pragma: no cover - defensive guard
-            LOGGER.exception("Unexpected error uploading TTS result for %s", sid)
-            self.last_upload = None
-            return None
-
-        try:
-            file_path.unlink()
-            if not any(file_path.parent.iterdir()):
-                file_path.parent.rmdir()
-        except OSError:
-            LOGGER.debug("Failed to clean up local TTS artefact %s", file_path, exc_info=True)
-
         return url
 
 
