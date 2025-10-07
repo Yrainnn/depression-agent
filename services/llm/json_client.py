@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from time import monotonic
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -22,6 +23,11 @@ from services.orchestrator.gap_utils import GAP_LABELS, detect_information_gaps
 from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK
 
 LOGGER = logging.getLogger(__name__)
+
+
+class DeepSeekTemporarilyUnavailableError(RuntimeError):
+    """Raised when the DeepSeek client is temporarily unavailable."""
+    pass
 
 
 class HAMDItem(BaseModel):
@@ -77,7 +83,11 @@ class DeepSeekJSONClient:
         self.base = base or settings.deepseek_api_base
         self.key = key or settings.deepseek_api_key
         self.model = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.chat_timeout = float(settings.deepseek_chat_timeout)
+        self.clarify_timeout = float(settings.deepseek_clarify_timeout)
+        self.controller_timeout = float(settings.deepseek_controller_timeout)
         self._warned_bad_base = False
+        self._circuit_open_until: Optional[float] = None
         trimmed_base = (self.base or "").rstrip("/")
         if trimmed_base and not trimmed_base.endswith("/v1"):
             LOGGER.warning(
@@ -92,6 +102,24 @@ class DeepSeekJSONClient:
     def enabled(self) -> bool:
         return bool(self.base and self.key)
 
+    def usable(self) -> bool:
+        return self.enabled() and not self._is_circuit_open()
+
+    def _is_circuit_open(self) -> bool:
+        if self._circuit_open_until is None:
+            return False
+        if monotonic() >= self._circuit_open_until:
+            self._circuit_open_until = None
+            return False
+        return True
+
+    def _trip_circuit(self, duration: Optional[float] = None) -> None:
+        effective = self.chat_timeout if duration is None else duration
+        if effective <= 0:
+            self._circuit_open_until = None
+            return
+        self._circuit_open_until = monotonic() + effective
+
     @retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
     def _post_chat(
         self,
@@ -100,10 +128,16 @@ class DeepSeekJSONClient:
         response_format: Optional[dict] = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
-        timeout: float = 20.0,
+        timeout: Optional[float] = None,
     ) -> str:
         if not self.enabled():  # pragma: no cover - guard rail
             raise RuntimeError("DeepSeek client not configured")
+
+        if self._is_circuit_open():
+            remaining = max(self._circuit_open_until - monotonic(), 0) if self._circuit_open_until else 0
+            raise DeepSeekTemporarilyUnavailableError(
+                f"DeepSeek client temporarily disabled (retry in {remaining:.1f}s)"
+            )
 
         url_base = (self.base or "").strip()
         trimmed_base = url_base.rstrip("/")
@@ -156,7 +190,8 @@ class DeepSeekJSONClient:
         if response_format:
             payload["response_format"] = response_format
 
-        with httpx.Client(timeout=timeout) as client:
+        effective_timeout = self.chat_timeout if timeout is None else timeout
+        with httpx.Client(timeout=effective_timeout) as client:
             try:
                 response = client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
@@ -171,9 +206,16 @@ class DeepSeekJSONClient:
                 raise
             except httpx.RequestError as exc:
                 LOGGER.error("DeepSeek chat request errored: %s", exc)
+                read_timeout_cls = getattr(httpx, "ReadTimeout", None)
+                if read_timeout_cls and isinstance(exc, read_timeout_cls):
+                    self._trip_circuit()
+                    raise DeepSeekTemporarilyUnavailableError(
+                        "DeepSeek timed out and is temporarily unavailable"
+                    ) from exc
                 raise
 
             data = response.json()
+            self._circuit_open_until = None
             return data["choices"][0]["message"]["content"]
 
     def analyze(
@@ -181,6 +223,10 @@ class DeepSeekJSONClient:
         dialogue_json: List[dict],
         system_prompt: Optional[str] = None,
     ) -> HAMDResult:
+        if not self.usable():
+            raise DeepSeekTemporarilyUnavailableError(
+                "DeepSeek analyze skipped because the client is temporarily unavailable"
+            )
         prompt = system_prompt or get_prompt_hamd17()
         messages = [
             {"role": "system", "content": prompt},
@@ -190,9 +236,12 @@ class DeepSeekJSONClient:
             content = self._post_chat(
                 messages=messages,
                 response_format={"type": "json_object"},
+                timeout=self.chat_timeout,
             )
             parsed = json.loads(content)
             return HAMDResult.model_validate(parsed)
+        except DeepSeekTemporarilyUnavailableError:
+            raise
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analyze failed: %s", exc)
 
@@ -276,7 +325,7 @@ class DeepSeekJSONClient:
                 response_format=None,
                 max_tokens=64,
                 temperature=0.2,
-                timeout=15,
+                timeout=self.clarify_timeout,
             )
             text = (content or "").strip()
             for end in ["？", "。", "!", "！", "?"]:
@@ -284,6 +333,8 @@ class DeepSeekJSONClient:
                     text = text.split(end)[0] + end
                     break
             return text[:30] if text else None
+        except DeepSeekTemporarilyUnavailableError:
+            return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek clarify generation failed: %s", exc)
             return None
@@ -293,6 +344,10 @@ class DeepSeekJSONClient:
         dialogue_json: List[dict],
         progress: dict,
     ) -> ControllerDecision:
+        if not self.usable():
+            raise DeepSeekTemporarilyUnavailableError(
+                "DeepSeek controller planning skipped because the client is temporarily unavailable"
+            )
         prompt = get_prompt_hamd17_controller()
         messages = [
             {"role": "system", "content": prompt},
@@ -312,7 +367,7 @@ class DeepSeekJSONClient:
             response_format={"type": "json_object"},
             max_tokens=2048,
             temperature=0.2,
-            timeout=25,
+            timeout=self.controller_timeout,
         )
         data = json.loads(content)
         return ControllerDecision.model_validate(data)
@@ -323,6 +378,7 @@ client = DeepSeekJSONClient()
 
 __all__ = [
     "DeepSeekJSONClient",
+    "DeepSeekTemporarilyUnavailableError",
     "HAMDItem",
     "HAMDResult",
     "HAMDTotal",
