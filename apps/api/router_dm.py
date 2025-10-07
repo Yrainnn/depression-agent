@@ -2,25 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
-
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from packages.common.config import settings
 from services.orchestrator.langgraph_min import orchestrator
+from services.oss.uploader import OSSUploader
 from services.report.build import build_pdf
 from services.tts.tts_adapter import TTSAdapter
 from services.store.repository import repository
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -72,6 +71,54 @@ async def dm_step(payload: DMStepPayload) -> StepResponse:
         scale=payload.scale or "HAMD17",
     )
     return StepResponse(**result)
+
+
+@router.post("/dm/report")
+async def generate_report(request: Request) -> Dict[str, Any]:
+    try:
+        data = await request.json()
+    except Exception:
+        return {"error": "请求体格式错误"}
+
+    sid = data.get("sid") if isinstance(data, dict) else None
+    if not sid:
+        return {"error": "缺少 sid 参数"}
+
+    try:
+        state = orchestrator._load_state(sid)
+        score_payload = orchestrator._prepare_report_scores(sid, state)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        return {"error": str(exc)}
+
+    if not score_payload:
+        return {"error": "无有效评分数据，无法生成报告"}
+
+    try:
+        report_result = build_pdf(sid, score_payload)
+        if not isinstance(report_result, dict):
+            return {"error": "报告文件生成失败"}
+
+        report_url = report_result.get("report_url")
+        local_path: Optional[str] = report_result.get("path") or report_result.get("file_path")
+
+        uploader = OSSUploader()
+        if uploader.enabled and local_path:
+            try:
+                oss_key = uploader.upload_file(str(local_path), oss_key_prefix="reports/")
+                report_url = uploader.get_presigned_url(oss_key)
+            except Exception as exc:  # pragma: no cover - network/service guard
+                LOGGER.warning("OSS 上传失败，使用本地链接返回：%s", exc)
+
+        if not report_url:
+            if local_path:
+                report_url = str(Path(str(local_path)).resolve().as_uri())
+            else:
+                return {"error": "报告链接生成失败"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    LOGGER.info("报告生成成功")
+    return {"report_url": report_url, "sid": sid}
 
 
 class AsrTranscribeRequest(BaseModel):

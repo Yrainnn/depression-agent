@@ -373,4 +373,9 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         output_path,
         metadata={"type": "report", "format": "pdf"},
     )
-    return {"report_url": oss_url or output_path.resolve().as_uri()}
+    resolved_path = output_path.resolve()
+    return {
+        "report_url": oss_url or resolved_path.as_uri(),
+        "file_path": str(resolved_path),
+        "path": str(resolved_path),
+    }
