@@ -95,17 +95,25 @@ async def generate_report(request: Request) -> Dict[str, Any]:
 
     try:
         report_result = build_pdf(sid, score_payload)
-        local_path: Optional[str] = None
-        if isinstance(report_result, dict):
-            path_value = report_result.get("path") or report_result.get("file_path")
-            if path_value:
-                local_path = str(path_value)
-        if not local_path:
+        if not isinstance(report_result, dict):
             return {"error": "报告文件生成失败"}
 
+        report_url = report_result.get("report_url")
+        local_path: Optional[str] = report_result.get("path") or report_result.get("file_path")
+
         uploader = OSSUploader()
-        oss_key = uploader.upload_file(local_path, oss_key_prefix="reports/")
-        report_url = uploader.get_presigned_url(oss_key)
+        if uploader.enabled and local_path:
+            try:
+                oss_key = uploader.upload_file(str(local_path), oss_key_prefix="reports/")
+                report_url = uploader.get_presigned_url(oss_key)
+            except Exception as exc:  # pragma: no cover - network/service guard
+                LOGGER.warning("OSS 上传失败，使用本地链接返回：%s", exc)
+
+        if not report_url:
+            if local_path:
+                report_url = str(Path(str(local_path)).resolve().as_uri())
+            else:
+                return {"error": "报告链接生成失败"}
     except Exception as exc:
         return {"error": str(exc)}
 
