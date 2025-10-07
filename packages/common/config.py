@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     redis_password: Optional[str] = Field(None, alias="REDIS_PASSWORD")
     deepseek_api_base: Optional[str] = Field(None, alias="DEEPSEEK_API_BASE")
     deepseek_api_key: Optional[str] = Field(None, alias="DEEPSEEK_API_KEY")
+    dashscope_api_key: Optional[str] = Field(None, alias="DASHSCOPE_API_KEY")
+    dashscope_tts_model: str = Field("cosyvoice-v2", alias="DASHSCOPE_TTS_MODEL")
+    dashscope_tts_voice: str = Field("longxiaochun_v2", alias="DASHSCOPE_TTS_VOICE")
+    dashscope_tts_format: str = Field("wav", alias="DASHSCOPE_TTS_FORMAT")
     prompt_hamd17_path: Optional[str] = Field(None, alias="PROMPT_HAMD17_PATH")
     prompt_diagnosis_path: Optional[str] = Field(None, alias="PROMPT_DIAGNOSIS_PATH")
     prompt_mdd_judgment_path: Optional[str] = Field(None, alias="PROMPT_MDD_JUDGMENT_PATH")
@@ -120,6 +124,22 @@ class Settings(BaseSettings):
     @property
     def DEEPSEEK_API_KEY(self) -> Optional[str]:
         return self.deepseek_api_key
+
+    @property
+    def DASHSCOPE_API_KEY(self) -> Optional[str]:
+        return self.dashscope_api_key
+
+    @property
+    def DASHSCOPE_TTS_MODEL(self) -> str:
+        return self.dashscope_tts_model
+
+    @property
+    def DASHSCOPE_TTS_VOICE(self) -> str:
+        return self.dashscope_tts_voice
+
+    @property
+    def DASHSCOPE_TTS_FORMAT(self) -> str:
+        return self.dashscope_tts_format
 
     @property
     def PROMPT_HAMD17_PATH(self) -> Optional[str]:
