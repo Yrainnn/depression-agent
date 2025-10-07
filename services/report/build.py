@@ -32,6 +32,36 @@ QUESTION_LOOKUP = {
 }
 
 
+def _get_uploader() -> OSSUploader:
+    uploader = getattr(build_pdf, "_uploader", None)
+    if uploader is None:
+        uploader = OSSUploader(key_prefix="reports/")
+        setattr(build_pdf, "_uploader", uploader)
+    return uploader
+
+
+def _cleanup_local(path: Path) -> None:
+    try:
+        path.unlink()
+        if not any(path.parent.iterdir()):
+            path.parent.rmdir()
+    except OSError:
+        LOGGER.debug("Failed to clean up local report artefact %s", path, exc_info=True)
+
+
+def _record_oss_reference(
+    repo: Optional[ConversationRepository],
+    sid: str,
+    payload: Dict[str, Any],
+) -> None:
+    if repo is None:
+        return
+    try:
+        repo.save_oss_reference(sid, payload)
+    except Exception:  # pragma: no cover - repository guard
+        LOGGER.exception("Failed to persist OSS reference for %s", sid)
+
+
 def _resolve_repository() -> Optional[ConversationRepository]:  # type: ignore[valid-type]
     repo = getattr(build_pdf, "_repository", None)
     if repo is not None:
