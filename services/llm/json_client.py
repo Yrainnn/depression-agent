@@ -4,8 +4,10 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from time import monotonic
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -17,8 +19,15 @@ from services.llm.prompts import (
     get_prompt_hamd17_controller,
     get_prompt_mdd_judgment,
 )
+from services.orchestrator.gap_utils import GAP_LABELS, detect_information_gaps
+from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK
 
 LOGGER = logging.getLogger(__name__)
+
+
+class DeepSeekTemporarilyUnavailableError(RuntimeError):
+    """Raised when the DeepSeek client is temporarily unavailable."""
+    pass
 
 
 class HAMDItem(BaseModel):
@@ -89,6 +98,24 @@ class DeepSeekJSONClient:
     def enabled(self) -> bool:
         return bool(self.base and self.key)
 
+    def usable(self) -> bool:
+        return self.enabled() and not self._is_circuit_open()
+
+    def _is_circuit_open(self) -> bool:
+        if self._circuit_open_until is None:
+            return False
+        if monotonic() >= self._circuit_open_until:
+            self._circuit_open_until = None
+            return False
+        return True
+
+    def _trip_circuit(self, duration: Optional[float] = None) -> None:
+        effective = self.chat_timeout if duration is None else duration
+        if effective <= 0:
+            self._circuit_open_until = None
+            return
+        self._circuit_open_until = monotonic() + effective
+
     @retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
     def _post_chat(
         self,
@@ -97,7 +124,7 @@ class DeepSeekJSONClient:
         response_format: Optional[dict] = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
-        timeout: float = 20.0,
+        timeout: Optional[float] = None,
     ) -> str:
         if not self.enabled():  # pragma: no cover - guard rail
             raise RuntimeError("DeepSeek client not configured")
@@ -142,6 +169,7 @@ class DeepSeekJSONClient:
                 raise
 
             data = response.json()
+            self._circuit_open_until = None
             return data["choices"][0]["message"]["content"]
 
     def analyze(
@@ -149,6 +177,10 @@ class DeepSeekJSONClient:
         dialogue_json: List[dict],
         system_prompt: Optional[str] = None,
     ) -> HAMDResult:
+        if not self.usable():
+            raise DeepSeekTemporarilyUnavailableError(
+                "DeepSeek analyze skipped because the client is temporarily unavailable"
+            )
         prompt = system_prompt or get_prompt_hamd17()
         messages = [
             {"role": "system", "content": prompt},
@@ -158,43 +190,46 @@ class DeepSeekJSONClient:
             content = self._post_chat(
                 messages=messages,
                 response_format={"type": "json_object"},
+                timeout=self.chat_timeout,
             )
             parsed = json.loads(content)
             return HAMDResult.model_validate(parsed)
+        except DeepSeekTemporarilyUnavailableError:
+            raise
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analyze failed: %s", exc)
+
             latest_user_text = ""
+            latest_item_id = 1
             for entry in reversed(dialogue_json):
-                if entry.get("role") == "user":
+                role = entry.get("role")
+                if role == "user" and not latest_user_text:
                     latest_user_text = entry.get("text") or ""
-                    break
+                if role == "assistant" and entry.get("text"):
+                    text = str(entry.get("text"))
+                    for item_id, payload in HAMD17_QUESTION_BANK.items():
+                        questions = payload.get("primary", [])
+                        clarifies = []
+                        clarify_map = payload.get("clarify", {})
+                        for value in clarify_map.values():
+                            if isinstance(value, list):
+                                clarifies.extend(value)
+                        if any(q in text or text in q for q in questions + clarifies):
+                            latest_item_id = item_id
+                            break
+                    if latest_item_id != 1:
+                        break
 
-            lowered = (latest_user_text or "").lower()
-            needs_frequency = not any(keyword in lowered for keyword in ("次", "天", "每周"))
-            needs_duration = not any(
-                keyword in lowered for keyword in ("整天", "小时", "多久")
-            )
-            needs_severity = not any(
-                keyword in lowered for keyword in ("严重", "很难", "影响")
-            )
-            needs_negation = any(keyword in lowered for keyword in ("没有", "不"))
-
-            clarify_need: Optional[str] = None
-            if needs_frequency:
-                clarify_need = "频次"
-            elif needs_duration:
-                clarify_need = "持续时间"
-            elif needs_severity:
-                clarify_need = "严重程度"
-            elif needs_negation:
-                clarify_need = "是否否定"
+            gaps = detect_information_gaps(latest_user_text, item_id=latest_item_id)
+            gap_key = gaps[0] if gaps else None
+            clarify_need = GAP_LABELS.get(gap_key, None)
 
             mock = {
                 "items": [
                     {
-                        "item_id": 1,
+                        "item_id": latest_item_id,
                         "symptom_summary": "信息有限",
-                        "dialogue_evidence": "信息缺失",
+                        "dialogue_evidence": latest_user_text or "信息缺失",
                         "evidence_refs": [],
                         "score": 0,
                         "score_type": "类型4",
@@ -213,7 +248,8 @@ class DeepSeekJSONClient:
                         "score_reason": "未涉及",
                         "clarify_need": None,
                     }
-                    for idx in range(2, 18)
+                    for idx in range(1, 18)
+                    if idx != latest_item_id
                 ],
                 "total_score": {
                     "得分序列": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
@@ -243,7 +279,7 @@ class DeepSeekJSONClient:
                 response_format=None,
                 max_tokens=64,
                 temperature=0.2,
-                timeout=15,
+                timeout=self.clarify_timeout,
             )
             text = (content or "").strip()
             for end in ["？", "。", "!", "！", "?"]:
@@ -251,6 +287,8 @@ class DeepSeekJSONClient:
                     text = text.split(end)[0] + end
                     break
             return text[:30] if text else None
+        except DeepSeekTemporarilyUnavailableError:
+            return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek clarify generation failed: %s", exc)
             return None
@@ -260,6 +298,10 @@ class DeepSeekJSONClient:
         dialogue_json: List[dict],
         progress: dict,
     ) -> ControllerDecision:
+        if not self.usable():
+            raise DeepSeekTemporarilyUnavailableError(
+                "DeepSeek controller planning skipped because the client is temporarily unavailable"
+            )
         prompt = get_prompt_hamd17_controller()
         messages = [
             {"role": "system", "content": prompt},
@@ -279,7 +321,7 @@ class DeepSeekJSONClient:
             response_format={"type": "json_object"},
             max_tokens=2048,
             temperature=0.2,
-            timeout=25,
+            timeout=self.controller_timeout,
         )
         data = json.loads(content)
         return ControllerDecision.model_validate(data)
@@ -290,6 +332,7 @@ client = DeepSeekJSONClient()
 
 __all__ = [
     "DeepSeekJSONClient",
+    "DeepSeekTemporarilyUnavailableError",
     "HAMDItem",
     "HAMDResult",
     "HAMDTotal",
