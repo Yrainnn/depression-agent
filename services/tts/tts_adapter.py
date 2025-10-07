@@ -4,18 +4,45 @@ import time
 import uuid
 import wave
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
+
+from services.oss import OSSUploader, OSSUploaderError
+
+
+def _discover_dashscope() -> Tuple[Optional[Any], Optional[type]]:
+    try:
+        import dashscope  # type: ignore[import-not-found]
+    except ImportError:
+        LOGGER.debug("DashScope SDK not available; using stub TTS pipeline")
+        return None, None
+
+    speech_cls = getattr(dashscope, "SpeechSynthesizer", None)
+    if speech_cls is None:
+        LOGGER.debug("DashScope SpeechSynthesizer missing; falling back to stub")
+        return dashscope, None
+
+    return dashscope, speech_cls
 
 LOGGER = logging.getLogger(__name__)
 SR = 16000
 
 
 class TTSAdapter:
-    def __init__(self, out_dir: str = "/tmp/da_tts") -> None:
+    def __init__(
+        self,
+        out_dir: str = "/tmp/da_tts",
+        *,
+        uploader: Optional[OSSUploader] = None,
+        oss_prefix: str = "tts/",
+    ) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         # 预留未来接入 CoSyVoice 的 Key
         self.api_key = os.getenv("DASHSCOPE_API_KEY")
+        self.uploader = uploader or OSSUploader()
+        self.oss_prefix = oss_prefix
+        self.last_upload: Optional[Dict[str, str]] = None
+        self._dashscope_module, self._dashscope_synth_cls = _discover_dashscope()
 
     def _write_silence_wav(self, path: Path, seconds: float = 1.0) -> None:
         frames = int(SR * seconds)
@@ -36,7 +63,40 @@ class TTSAdapter:
             "[TTS:stub] synthesized placeholder wav",
             extra={"sid": sid, "path": str(target), "voice": voice, "text": text[:80]},
         )
+
+        oss_url = self._upload_to_oss(sid, target)
+        if oss_url:
+            return oss_url
         return f"file://{target.resolve()}"
+
+    def _upload_to_oss(self, sid: str, file_path: Path) -> Optional[str]:
+        if not self.uploader.enabled:
+            self.last_upload = None
+            return None
+
+        base_prefix = self.oss_prefix.rstrip("/")
+        prefix = f"{base_prefix}/{sid}/" if base_prefix else f"{sid}/"
+        try:
+            oss_key = self.uploader.upload_file(str(file_path), oss_key_prefix=prefix)
+            url = self.uploader.get_presigned_url(oss_key, expires_minutes=24 * 60)
+            self.last_upload = {"oss_key": oss_key, "url": url}
+        except (OSError, OSSUploaderError) as exc:
+            LOGGER.warning("Failed to upload TTS result for %s: %s", sid, exc)
+            self.last_upload = None
+            return None
+        except Exception:  # pragma: no cover - defensive guard
+            LOGGER.exception("Unexpected error uploading TTS result for %s", sid)
+            self.last_upload = None
+            return None
+
+        try:
+            file_path.unlink()
+            if not any(file_path.parent.iterdir()):
+                file_path.parent.rmdir()
+        except OSError:
+            LOGGER.debug("Failed to clean up local TTS artefact %s", file_path, exc_info=True)
+
+        return url
 
 
 def synthesize(text: str, *, voice: Optional[str] = None) -> str:

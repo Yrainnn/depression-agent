@@ -63,6 +63,10 @@ class Settings(BaseSettings):
         default_factory=lambda: os.getenv("TINGWU_LANG", "cn"),
         alias="TINGWU_LANG",
     )
+    oss_region: Optional[str] = Field(None, alias="OSS_REGION")
+    oss_endpoint: Optional[str] = Field(None, alias="OSS_ENDPOINT")
+    oss_bucket: Optional[str] = Field(None, alias="OSS_BUCKET")
+    oss_key_prefix: str = Field("tingwu-uploads/", alias="OSS_KEY_PREFIX")
 
     # ------------------------------------------------------------------
     # Compatibility accessors (new uppercase field names exposed for callers)
@@ -101,6 +105,22 @@ class Settings(BaseSettings):
     @property
     def TINGWU_LANG(self) -> str:
         return self.tingwu_lang
+
+    @property
+    def OSS_REGION(self) -> Optional[str]:
+        return self.oss_region
+
+    @property
+    def OSS_ENDPOINT(self) -> Optional[str]:
+        return self.oss_endpoint
+
+    @property
+    def OSS_BUCKET(self) -> Optional[str]:
+        return self.oss_bucket
+
+    @property
+    def OSS_KEY_PREFIX(self) -> str:
+        return self.oss_key_prefix
 
     @property
     def ALIBABA_CLOUD_ACCESS_KEY_ID(self) -> Optional[str]:
