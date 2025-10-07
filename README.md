@@ -85,7 +85,7 @@ curl -X POST "http://127.0.0.1:8080/report/build" \
 
 - **TingWu ASR**：`services/audio/asr_adapter.py` 通过 `services/audio/tingwu_client.py` 调用阿里听悟 CreateTask → WebSocket 推流 → GetTaskInfo 流程，自动回退到 Stub。
 - **CoSyVoice TTS**：在 `services/tts/tts_adapter.py` 中调用真实语音合成接口，返回或缓存生成的语音资源。
-- **真实 LLM**：在 `.env` 配置 `DEEPSEEK_API_BASE`（可选）、`DEEPSEEK_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。
+- **真实 LLM**：在 `.env` 配置 `DEEPSEEK_API_BASE`（可选）、`DEEPSEEK_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。`DEEPSEEK_API_BASE` 可填写 `https://api.deepseek.com` 或 `https://api.deepseek.com/v1`，客户端会自动归一化为 `/v1/chat/completions`。
 
 ## DeepSeek JSON 评分与澄清问
 
