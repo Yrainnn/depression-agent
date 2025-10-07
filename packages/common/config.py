@@ -17,11 +17,18 @@ class Settings(BaseSettings):
     redis_password: Optional[str] = Field(None, alias="REDIS_PASSWORD")
     deepseek_api_base: Optional[str] = Field(None, alias="DEEPSEEK_API_BASE")
     deepseek_api_key: Optional[str] = Field(None, alias="DEEPSEEK_API_KEY")
+    dashscope_api_key: Optional[str] = Field(None, alias="DASHSCOPE_API_KEY")
+    dashscope_tts_model: str = Field("cosyvoice-v2", alias="DASHSCOPE_TTS_MODEL")
+    dashscope_tts_voice: str = Field("longxiaochun_v2", alias="DASHSCOPE_TTS_VOICE")
+    dashscope_tts_format: str = Field("wav", alias="DASHSCOPE_TTS_FORMAT")
     prompt_hamd17_path: Optional[str] = Field(None, alias="PROMPT_HAMD17_PATH")
     prompt_diagnosis_path: Optional[str] = Field(None, alias="PROMPT_DIAGNOSIS_PATH")
     prompt_mdd_judgment_path: Optional[str] = Field(None, alias="PROMPT_MDD_JUDGMENT_PATH")
     prompt_clarify_cn_path: Optional[str] = Field(None, alias="PROMPT_CLARIFY_CN_PATH")
     enable_ds_controller: bool = Field(True, alias="ENABLE_DS_CONTROLLER")
+    deepseek_chat_timeout: float = Field(90.0, alias="DEEPSEEK_CHAT_TIMEOUT")
+    deepseek_clarify_timeout: float = Field(60.0, alias="DEEPSEEK_CLARIFY_TIMEOUT")
+    deepseek_controller_timeout: float = Field(90.0, alias="DEEPSEEK_CONTROLLER_TIMEOUT")
     alibaba_cloud_access_key_id: Optional[str] = Field(
         None, alias="ALIBABA_CLOUD_ACCESS_KEY_ID"
     )
@@ -119,6 +126,22 @@ class Settings(BaseSettings):
         return self.deepseek_api_key
 
     @property
+    def DASHSCOPE_API_KEY(self) -> Optional[str]:
+        return self.dashscope_api_key
+
+    @property
+    def DASHSCOPE_TTS_MODEL(self) -> str:
+        return self.dashscope_tts_model
+
+    @property
+    def DASHSCOPE_TTS_VOICE(self) -> str:
+        return self.dashscope_tts_voice
+
+    @property
+    def DASHSCOPE_TTS_FORMAT(self) -> str:
+        return self.dashscope_tts_format
+
+    @property
     def PROMPT_HAMD17_PATH(self) -> Optional[str]:
         return self.prompt_hamd17_path
 
@@ -137,6 +160,18 @@ class Settings(BaseSettings):
     @property
     def ENABLE_DS_CONTROLLER(self) -> bool:
         return self.enable_ds_controller
+
+    @property
+    def DEEPSEEK_CHAT_TIMEOUT(self) -> float:
+        return self.deepseek_chat_timeout
+
+    @property
+    def DEEPSEEK_CLARIFY_TIMEOUT(self) -> float:
+        return self.deepseek_clarify_timeout
+
+    @property
+    def DEEPSEEK_CONTROLLER_TIMEOUT(self) -> float:
+        return self.deepseek_controller_timeout
 
     class Config:
         env_file = ".env"
