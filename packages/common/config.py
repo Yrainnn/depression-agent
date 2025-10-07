@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     deepseek_chat_timeout: float = Field(90.0, alias="DEEPSEEK_CHAT_TIMEOUT")
     deepseek_clarify_timeout: float = Field(60.0, alias="DEEPSEEK_CLARIFY_TIMEOUT")
     deepseek_controller_timeout: float = Field(90.0, alias="DEEPSEEK_CONTROLLER_TIMEOUT")
+    oss_endpoint: Optional[str] = Field(None, alias="OSS_ENDPOINT")
+    oss_bucket: Optional[str] = Field(None, alias="OSS_BUCKET")
+    oss_prefix: str = Field("", alias="OSS_PREFIX")
+    oss_access_key_id: Optional[str] = Field(None, alias="OSS_ACCESS_KEY_ID")
+    oss_access_key_secret: Optional[str] = Field(None, alias="OSS_ACCESS_KEY_SECRET")
+    oss_public_base_url: Optional[str] = Field(None, alias="OSS_BASE_URL")
     alibaba_cloud_access_key_id: Optional[str] = Field(
         None, alias="ALIBABA_CLOUD_ACCESS_KEY_ID"
     )
@@ -192,6 +198,30 @@ class Settings(BaseSettings):
     @property
     def DEEPSEEK_CONTROLLER_TIMEOUT(self) -> float:
         return self.deepseek_controller_timeout
+
+    @property
+    def OSS_ENDPOINT(self) -> Optional[str]:
+        return self.oss_endpoint
+
+    @property
+    def OSS_BUCKET(self) -> Optional[str]:
+        return self.oss_bucket
+
+    @property
+    def OSS_PREFIX(self) -> str:
+        return self.oss_prefix
+
+    @property
+    def OSS_ACCESS_KEY_ID(self) -> Optional[str]:
+        return self.oss_access_key_id or self.ALIBABA_CLOUD_ACCESS_KEY_ID
+
+    @property
+    def OSS_ACCESS_KEY_SECRET(self) -> Optional[str]:
+        return self.oss_access_key_secret or self.ALIBABA_CLOUD_ACCESS_KEY_SECRET
+
+    @property
+    def OSS_BASE_URL(self) -> Optional[str]:
+        return self.oss_public_base_url
 
     class Config:
         env_file = ".env"

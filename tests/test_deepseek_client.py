@@ -38,6 +38,12 @@ class _Settings:
     deepseek_chat_timeout: float = 90.0
     deepseek_clarify_timeout: float = 60.0
     deepseek_controller_timeout: float = 90.0
+    OSS_ENDPOINT: str | None = None
+    OSS_BUCKET: str | None = None
+    OSS_PREFIX: str = ""
+    OSS_ACCESS_KEY_ID: str | None = None
+    OSS_ACCESS_KEY_SECRET: str | None = None
+    OSS_BASE_URL: str | None = None
 
 
 config_stub.settings = _Settings()

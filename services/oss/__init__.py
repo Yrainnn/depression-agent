@@ -1,5 +1,4 @@
-"""Utilities for interacting with Alibaba Cloud OSS."""
+"""Aliyun OSS integration helpers."""
 
-from .uploader import OSSUploader, OSSUploaderError
+from .client import OSSClient, oss_client  # noqa: F401
 
-__all__ = ["OSSUploader", "OSSUploaderError"]

@@ -88,3 +88,40 @@ def test_tts_adapter_invokes_injected_factory_for_each_call(tmp_path):
     assert calls[0]["kwargs"].get("format") == "wav"
     assert calls[0]["call_count"] == 1
     assert calls[1]["call_count"] == 1
+
+
+def test_tts_adapter_uploads_audio_when_oss_enabled(tmp_path):
+    uploads = []
+
+    class FakeOSS:
+        enabled = True
+
+        def store_artifact(self, sid, category, path, metadata=None):
+            uploads.append({
+                "sid": sid,
+                "category": category,
+                "path": str(path),
+                "metadata": metadata,
+            })
+            filename = Path(path).name
+            return f"https://oss.example/{category}/{filename}"
+
+    def factory(model: str, voice: str, audio_format: str):
+        class _FakeSynth:
+            def call(self, text: str, **kwargs):
+                return _make_wav_bytes()
+
+        return _FakeSynth()
+
+    adapter = TTSAdapter(
+        out_dir=str(tmp_path),
+        synthesizer_factory=factory,
+        oss_client=FakeOSS(),
+    )
+
+    url = adapter.synthesize("oss-sid", "需要上传")
+
+    assert url.startswith("https://oss.example/tts/")
+    assert uploads and uploads[0]["category"] == "tts"
+    assert Path(uploads[0]["path"]).exists()
+    assert uploads[0]["metadata"]["type"] == "tts"

@@ -121,6 +121,12 @@ class _Settings:
         self.TINGWU_SAMPLE_RATE = 16000
         self.TINGWU_FORMAT = "pcm"
         self.TINGWU_LANG = "cn"
+        self.OSS_ENDPOINT = ""
+        self.OSS_BUCKET = ""
+        self.OSS_PREFIX = ""
+        self.OSS_ACCESS_KEY_ID = ""
+        self.OSS_ACCESS_KEY_SECRET = ""
+        self.OSS_BASE_URL = ""
 
 
 config_stub.settings = _Settings()

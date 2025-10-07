@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from packages.common.config import settings
+from services.oss.client import OSSClient, oss_client as default_oss_client
 
 LOGGER = logging.getLogger(__name__)
 SR = 16000
@@ -40,6 +41,7 @@ class TTSAdapter:
         synthesizer_factory: Optional[
             Callable[[str, str, Optional[str]], Any]
         ] = None,
+        oss_client: Optional[OSSClient] = None,
     ) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -53,6 +55,8 @@ class TTSAdapter:
             getattr(settings, "dashscope_tts_format", "wav") or "wav"
         ).lower()
         self.file_extension = self._normalize_extension(self.audio_format)
+
+        self.oss_client = oss_client or default_oss_client
 
         if synthesizer_factory is not None:
             self._synthesizer_factory = synthesizer_factory
@@ -157,7 +161,12 @@ class TTSAdapter:
                                 "first_package_delay_ms": delay_ms,
                             },
                         )
-                        return f"file://{target.resolve()}"
+                        return self._finalize_audio(
+                            sid,
+                            target,
+                            text,
+                            target_voice,
+                        )
                 except Exception:
                     LOGGER.exception(
                         "DashScope TTS synthesis failed; falling back to stub"
@@ -171,11 +180,44 @@ class TTSAdapter:
             "[TTS:stub] synthesized placeholder wav",
             extra={"sid": sid, "path": str(target), "voice": voice, "text": text[:80] if text else ""},
         )
+        return self._finalize_audio(sid, target, text, target_voice)
 
-        oss_url = self._upload_to_oss(sid, target)
-        if oss_url:
-            return oss_url
-        return f"file://{target.resolve()}"
+    # ------------------------------------------------------------------
+    def _finalize_audio(
+        self,
+        sid: str,
+        path: Path,
+        text: Optional[str],
+        voice: Optional[str],
+    ) -> str:
+        url = f"file://{path.resolve()}"
+        oss_url = self._upload_to_oss(sid, path, text=text, voice=voice)
+        return oss_url or url
+
+    def _upload_to_oss(
+        self,
+        sid: str,
+        path: Path,
+        *,
+        text: Optional[str],
+        voice: Optional[str],
+    ) -> Optional[str]:
+        client = self.oss_client
+        if client is None or not getattr(client, "enabled", False):
+            return None
+        metadata = {
+            "type": "tts",
+            "voice": voice,
+        }
+        if text:
+            metadata["text"] = text[:200]
+        url = client.store_artifact(
+            sid,
+            "tts",
+            path,
+            metadata=metadata,
+        )
+        return url
 
     def _upload_to_oss(self, sid: str, file_path: Path) -> Optional[str]:
         if not self.uploader.enabled:

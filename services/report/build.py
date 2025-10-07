@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - runtime guard
     _shared_repository = None  # type: ignore
 
 from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK, MAX_SCORE
-from services.oss import OSSUploader, OSSUploaderError
+from services.oss.client import oss_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -367,24 +367,10 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = REPORT_DIR / f"report_{sid}.pdf"
     HTML(string=html).write_pdf(str(output_path))
-
-    uploader = _get_uploader()
-    report_url = output_path.resolve().as_uri()
-    if uploader.enabled:
-        try:
-            oss_key = uploader.upload_file(
-                str(output_path), oss_key_prefix=f"reports/{sid}/"
-            )
-            report_url = uploader.get_presigned_url(oss_key, expires_minutes=24 * 60)
-            _cleanup_local(output_path)
-            _record_oss_reference(
-                repo,
-                sid,
-                {"type": "report", "oss_key": oss_key, "url": report_url},
-            )
-        except (OSError, OSSUploaderError) as exc:
-            LOGGER.warning("Failed to upload report PDF for %s: %s", sid, exc)
-        except Exception:  # pragma: no cover - defensive guard
-            LOGGER.exception("Unexpected error uploading report PDF for %s", sid)
-
-    return {"report_url": report_url}
+    oss_url = oss_client.store_artifact(
+        sid,
+        "reports",
+        output_path,
+        metadata={"type": "report", "format": "pdf"},
+    )
+    return {"report_url": oss_url or output_path.resolve().as_uri()}
