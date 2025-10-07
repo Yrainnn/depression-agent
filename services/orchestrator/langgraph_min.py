@@ -251,14 +251,20 @@ class LangGraphMini:
         dialogue_payload = self._build_dialogue_payload(sid)
         current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
-        controller_enabled = settings.ENABLE_DS_CONTROLLER and self.deepseek.enabled()
+        controller_enabled = (
+            settings.ENABLE_DS_CONTROLLER and self.deepseek.usable()
+        )
 
         if not controller_enabled:
             if not state.controller_notice_logged:
                 reason = (
                     "disabled via settings"
                     if not settings.ENABLE_DS_CONTROLLER
-                    else "client not configured"
+                    else (
+                        "client not configured"
+                        if not self.deepseek.enabled()
+                        else "temporarily unavailable"
+                    )
                 )
                 LOGGER.info("DeepSeek controller unavailable for %s: %s", sid, reason)
                 state.controller_notice_logged = True
@@ -295,6 +301,20 @@ class LangGraphMini:
         decision: Optional[ControllerDecision] = None
         try:
             decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
+            state.controller_notice_logged = True
+            state.controller_unusable_turn = state.last_utt_index
+            self._persist_state(state)
+            return self._fallback_flow(
+                sid=sid,
+                state=state,
+                item_id=item_id,
+                scoring_segments=scoring_segments,
+                dialogue=dialogue_payload,
+                transcripts=transcripts,
+                user_text=user_text,
+            )
         except Exception as exc:  # pragma: no cover - runtime guard
             log_method = LOGGER.warning
             if state.controller_notice_logged:
@@ -351,14 +371,6 @@ class LangGraphMini:
                 transcripts=transcripts,
                 user_text=user_text,
             )
-
-        if state.controller_unusable_turn is not None:
-            state.controller_unusable_turn = None
-            self._persist_state(state)
-
-        if state.controller_unusable_turn is not None:
-            state.controller_unusable_turn = None
-            self._persist_state(state)
 
         if state.controller_unusable_turn is not None:
             state.controller_unusable_turn = None
@@ -700,7 +712,8 @@ class LangGraphMini:
     def _handle_risk_hold(
         self, sid: str, state: SessionState, segments: List[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        if not state.risk_hold:
+        risk_hold_active = getattr(state, "risk_hold", False)
+        if not risk_hold_active:
             return None
 
         combined_text = "".join(
@@ -714,7 +727,7 @@ class LangGraphMini:
             release_hit = any(pattern.search(combined_text) for pattern in RISK_RELEASE_PATTERNS)
             risk_snapshot = risk_engine.evaluate(combined_text)
             if release_hit and risk_snapshot.level != "high":
-                state.risk_hold = False
+                setattr(state, "risk_hold", False)
                 release_payload: Dict[str, Any] = {
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "reason": "用户确认已安全，解除风险保持态",
@@ -730,7 +743,7 @@ class LangGraphMini:
                 self._persist_state(state)
                 return None
 
-        state.risk_hold = True
+        setattr(state, "risk_hold", True)
         self._persist_state(state)
         return self._make_response(
             sid,
@@ -854,7 +867,7 @@ class LangGraphMini:
                     },
                 }
                 self._emit_risk_event(sid, event_payload)
-                state.risk_hold = True
+                setattr(state, "risk_hold", True)
                 self._persist_state(state)
                 LOGGER.info("Risk detected for %s: %s", sid, risk.triggers)
                 extra = {"risk": event_payload["risk"]}
@@ -1311,6 +1324,10 @@ class LangGraphMini:
         state.controller_unusable_turn = (
             int(controller_turn) if controller_turn is not None else None
         )
+        if "risk_hold" in raw:
+            setattr(state, "risk_hold", bool(raw.get("risk_hold")))
+        elif not hasattr(state, "risk_hold"):
+            setattr(state, "risk_hold", False)
         return state
 
     def _persist_state(self, state: SessionState) -> None:
@@ -1328,6 +1345,7 @@ class LangGraphMini:
                 "analysis": state.analysis,
                 "controller_notice_logged": state.controller_notice_logged,
                 "controller_unusable_turn": state.controller_unusable_turn,
+                "risk_hold": getattr(state, "risk_hold", False),
             },
         )
 

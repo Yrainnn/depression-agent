@@ -6,24 +6,9 @@ import time
 import uuid
 import wave
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
-from services.oss import OSSUploader, OSSUploaderError
-
-
-def _discover_dashscope() -> Tuple[Optional[Any], Optional[type]]:
-    try:
-        import dashscope  # type: ignore[import-not-found]
-    except ImportError:
-        LOGGER.debug("DashScope SDK not available; using stub TTS pipeline")
-        return None, None
-
-    speech_cls = getattr(dashscope, "SpeechSynthesizer", None)
-    if speech_cls is None:
-        LOGGER.debug("DashScope SpeechSynthesizer missing; falling back to stub")
-        return dashscope, None
-
-    return dashscope, speech_cls
+from packages.common.config import settings
 
 LOGGER = logging.getLogger(__name__)
 SR = 16000
@@ -52,17 +37,46 @@ class TTSAdapter:
         self,
         out_dir: str = "/tmp/da_tts",
         *,
-        uploader: Optional[OSSUploader] = None,
-        oss_prefix: str = "tts/",
+        synthesizer_factory: Optional[
+            Callable[[str, str, Optional[str]], Any]
+        ] = None,
     ) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        # 预留未来接入 CoSyVoice 的 Key
-        self.api_key = os.getenv("DASHSCOPE_API_KEY")
-        self.uploader = uploader or OSSUploader()
-        self.oss_prefix = oss_prefix
-        self.last_upload: Optional[Dict[str, str]] = None
-        self._dashscope_module, self._dashscope_synth_cls = _discover_dashscope()
+        self.api_key = (
+            getattr(settings, "dashscope_api_key", None)
+            or os.getenv("DASHSCOPE_API_KEY")
+        )
+        self.model = getattr(settings, "dashscope_tts_model", "cosyvoice-v2")
+        self.voice = getattr(settings, "dashscope_tts_voice", "longxiaochun_v2")
+        self.audio_format = (
+            getattr(settings, "dashscope_tts_format", "wav") or "wav"
+        ).lower()
+        self.file_extension = self._normalize_extension(self.audio_format)
+
+        if synthesizer_factory is not None:
+            self._synthesizer_factory = synthesizer_factory
+        elif _SPEECH_SYNTHESIZER_CLS and self.api_key:
+            if _DASHSCOPE_MODULE is not None:
+                _DASHSCOPE_MODULE.api_key = self.api_key
+
+            def _factory(model: str, voice: str, audio_format: Optional[str]) -> Any:
+                kwargs: Dict[str, Any] = {"model": model, "voice": voice}
+                return _SPEECH_SYNTHESIZER_CLS(**kwargs)  # type: ignore[misc]
+
+            self._synthesizer_factory = _factory
+        else:
+            self._synthesizer_factory = None
+
+    def _normalize_extension(self, fmt: Optional[str]) -> str:
+        if not fmt:
+            return "wav"
+        fmt_lower = fmt.lower().lstrip(".")
+        if fmt_lower in {"wav", "wave"}:
+            return "wav"
+        if fmt_lower in {"mp3", "m4a", "aac"}:
+            return fmt_lower
+        return fmt_lower
 
     def _write_silence_wav(self, path: Path, seconds: float = 1.0) -> None:
         frames = int(SR * seconds)

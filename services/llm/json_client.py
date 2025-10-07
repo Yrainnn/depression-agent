@@ -83,7 +83,11 @@ class DeepSeekJSONClient:
         self.base = base or settings.deepseek_api_base
         self.key = key or settings.deepseek_api_key
         self.model = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.chat_timeout = float(settings.deepseek_chat_timeout)
+        self.clarify_timeout = float(settings.deepseek_clarify_timeout)
+        self.controller_timeout = float(settings.deepseek_controller_timeout)
         self._warned_bad_base = False
+        self._circuit_open_until: Optional[float] = None
         trimmed_base = (self.base or "").rstrip("/")
         if trimmed_base and not trimmed_base.endswith("/v1"):
             LOGGER.warning(
@@ -129,8 +133,19 @@ class DeepSeekJSONClient:
         if not self.enabled():  # pragma: no cover - guard rail
             raise RuntimeError("DeepSeek client not configured")
 
-        url_base = (self.base or "").rstrip("/")
-        if not self._warned_bad_base and url_base and not url_base.endswith("/v1"):
+        if self._is_circuit_open():
+            remaining = max(self._circuit_open_until - monotonic(), 0) if self._circuit_open_until else 0
+            raise DeepSeekTemporarilyUnavailableError(
+                f"DeepSeek client temporarily disabled (retry in {remaining:.1f}s)"
+            )
+
+        url_base = (self.base or "").strip()
+        trimmed_base = url_base.rstrip("/")
+        if (
+            not self._warned_bad_base
+            and trimmed_base
+            and not trimmed_base.endswith("/v1")
+        ):
             LOGGER.warning(
                 "DeepSeek API base %s should include the /v1 suffix; requests will "
                 "append it automatically",
@@ -151,7 +166,8 @@ class DeepSeekJSONClient:
         if response_format:
             payload["response_format"] = response_format
 
-        with httpx.Client(timeout=timeout) as client:
+        effective_timeout = self.chat_timeout if timeout is None else timeout
+        with httpx.Client(timeout=effective_timeout) as client:
             try:
                 response = client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
@@ -166,6 +182,12 @@ class DeepSeekJSONClient:
                 raise
             except httpx.RequestError as exc:
                 LOGGER.error("DeepSeek chat request errored: %s", exc)
+                read_timeout_cls = getattr(httpx, "ReadTimeout", None)
+                if read_timeout_cls and isinstance(exc, read_timeout_cls):
+                    self._trip_circuit()
+                    raise DeepSeekTemporarilyUnavailableError(
+                        "DeepSeek timed out and is temporarily unavailable"
+                    ) from exc
                 raise
 
             data = response.json()
