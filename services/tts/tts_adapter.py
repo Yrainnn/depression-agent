@@ -53,6 +53,7 @@ class TTSAdapter:
             getattr(settings, "dashscope_tts_format", "wav") or "wav"
         ).lower()
         self.file_extension = self._normalize_extension(self.audio_format)
+        self._synthesizer_cache: Dict[str, Any] = {}
 
         if synthesizer_factory is not None:
             self._synthesizer_factory = synthesizer_factory
@@ -77,6 +78,26 @@ class TTSAdapter:
         if fmt_lower in {"mp3", "m4a", "aac"}:
             return fmt_lower
         return fmt_lower
+
+    def _cache_key(self, model: str, voice: str) -> str:
+        return f"{model}:{voice}"
+
+    def _get_synthesizer(self, model: str, voice: str) -> Optional[Any]:
+        if self._synthesizer_factory is None:
+            return None
+
+        cache_key = self._cache_key(model, voice)
+        if cache_key in self._synthesizer_cache:
+            return self._synthesizer_cache[cache_key]
+
+        try:
+            synthesizer = self._synthesizer_factory(model, voice, self.audio_format)
+        except Exception:  # pragma: no cover - defensive guard
+            LOGGER.exception("Failed to initialise DashScope synthesizer")
+            return None
+
+        self._synthesizer_cache[cache_key] = synthesizer
+        return synthesizer
 
     def _write_silence_wav(self, path: Path, seconds: float = 1.0) -> None:
         frames = int(SR * seconds)
@@ -123,35 +144,38 @@ class TTSAdapter:
         if text:
             text = text.strip()
 
+        target_voice = voice or self.voice or ""
+        cache_key = self._cache_key(self.model, target_voice)
+
         if text and self._synthesizer_factory is not None:
             try:
-                synthesizer = self._synthesizer_factory(
-                    self.model, voice or self.voice, self.audio_format
-                )
-                audio_bytes, request_id, delay_ms = self._call_synthesizer(
-                    synthesizer, text, audio_format=self.audio_format
-                )
-                if audio_bytes:
-                    timestamp = int(time.time() * 1000)
-                    filename = (
-                        f"{sid}-{timestamp}-{uuid.uuid4().hex}.{self.file_extension}"
+                synthesizer = self._get_synthesizer(self.model, target_voice)
+                if synthesizer is not None:
+                    audio_bytes, request_id, delay_ms = self._call_synthesizer(
+                        synthesizer, text, audio_format=self.audio_format
                     )
-                    target = session_dir / filename
-                    target.write_bytes(audio_bytes)
-                    LOGGER.info(
-                        "[TTS:dashscope] synthesized audio",
-                        extra={
-                            "sid": sid,
-                            "path": str(target),
-                            "voice": voice or self.voice,
-                            "text": text[:80] if text else "",
-                            "request_id": request_id,
-                            "first_package_delay_ms": delay_ms,
-                        },
-                    )
-                    return f"file://{target.resolve()}"
+                    if audio_bytes:
+                        timestamp = int(time.time() * 1000)
+                        filename = (
+                            f"{sid}-{timestamp}-{uuid.uuid4().hex}.{self.file_extension}"
+                        )
+                        target = session_dir / filename
+                        target.write_bytes(audio_bytes)
+                        LOGGER.info(
+                            "[TTS:dashscope] synthesized audio",
+                            extra={
+                                "sid": sid,
+                                "path": str(target),
+                                "voice": target_voice,
+                                "text": text[:80] if text else "",
+                                "request_id": request_id,
+                                "first_package_delay_ms": delay_ms,
+                            },
+                        )
+                        return f"file://{target.resolve()}"
             except Exception:
                 LOGGER.exception("DashScope TTS synthesis failed; falling back to stub")
+                self._synthesizer_cache.pop(cache_key, None)
 
         timestamp = int(time.time() * 1000)
         filename = f"{sid}-{timestamp}-{uuid.uuid4().hex}.wav"

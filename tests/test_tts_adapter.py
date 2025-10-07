@@ -31,18 +31,27 @@ def test_tts_adapter_uses_stub_when_dashscope_unavailable(tmp_path, monkeypatch)
         assert wav_file.getframerate() == 16000
 
 
-def test_tts_adapter_invokes_injected_factory(tmp_path):
+def test_tts_adapter_invokes_injected_factory_and_reuses_synth(tmp_path):
     calls = []
+    creations = []
+    instances = []
 
     def factory(model: str, voice: str, audio_format: str):
+        creations.append((model, voice, audio_format))
+
         class _FakeSynth:
+            def __init__(self) -> None:
+                self.call_count = 0
+
             def call(self, text: str, **kwargs):
+                self.call_count += 1
                 calls.append({
                     "model": model,
                     "voice": voice,
                     "audio_format": audio_format,
                     "text": text,
                     "kwargs": kwargs,
+                    "call_count": self.call_count,
                 })
                 return _make_wav_bytes()
 
@@ -52,21 +61,26 @@ def test_tts_adapter_invokes_injected_factory(tmp_path):
             def get_first_package_delay(self):
                 return 42.0
 
-        return _FakeSynth()
+        synth = _FakeSynth()
+        instances.append(synth)
+        return synth
 
     adapter = TTSAdapter(out_dir=str(tmp_path), synthesizer_factory=factory)
 
-    url = adapter.synthesize("sid456", "测试合成", voice="custom_voice")
-    assert url.startswith("file://")
-    audio_path = Path(url[len("file://") :])
-    assert audio_path.exists()
+    url1 = adapter.synthesize("sid456", "测试合成", voice="custom_voice")
+    url2 = adapter.synthesize("sid456", "再次合成", voice="custom_voice")
 
-    assert calls, "Expected synthesizer factory to be invoked"
-    call = calls[0]
-    assert call["voice"] == "custom_voice"
-    assert call["audio_format"] == "wav"
-    assert call["kwargs"].get("format") == "wav"
+    for url in (url1, url2):
+        assert url.startswith("file://")
+        audio_path = Path(url[len("file://") :])
+        assert audio_path.exists()
+        with wave.open(str(audio_path), "rb") as wav_file:
+            assert wav_file.getnchannels() == 1
+            assert wav_file.getnframes() > 0
 
-    with wave.open(str(audio_path), "rb") as wav_file:
-        assert wav_file.getnchannels() == 1
-        assert wav_file.getnframes() > 0
+    assert creations == [("cosyvoice-v2", "custom_voice", "wav")]
+    assert len(instances) == 1
+    assert calls and len(calls) == 2
+    assert calls[0]["voice"] == "custom_voice"
+    assert calls[0]["kwargs"].get("format") == "wav"
+    assert calls[1]["call_count"] == 2
