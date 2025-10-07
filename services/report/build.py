@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - runtime guard
     _shared_repository = None  # type: ignore
 
 from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK, MAX_SCORE
+from services.oss.client import oss_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -336,4 +337,10 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = REPORT_DIR / f"report_{sid}.pdf"
     HTML(string=html).write_pdf(str(output_path))
-    return {"report_url": output_path.resolve().as_uri()}
+    oss_url = oss_client.store_artifact(
+        sid,
+        "reports",
+        output_path,
+        metadata={"type": "report", "format": "pdf"},
+    )
+    return {"report_url": oss_url or output_path.resolve().as_uri()}
