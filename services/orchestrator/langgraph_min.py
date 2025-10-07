@@ -94,7 +94,6 @@ class SessionState:
     analysis: Optional[Dict[str, Any]] = None
     controller_notice_logged: bool = False
     controller_unusable_turn: Optional[int] = None
-    risk_hold: bool = False
 
 
 class LangGraphMini:
@@ -1287,7 +1286,21 @@ class LangGraphMini:
 
     def _make_tts(self, sid: str, text: str) -> str:
         try:
-            return self.tts.synthesize(sid, text)
+            url = self.tts.synthesize(sid, text)
+            if getattr(self.tts, "last_upload", None):
+                try:
+                    self.repo.save_oss_reference(
+                        sid,
+                        {
+                            "type": "tts",
+                            "url": self.tts.last_upload.get("url"),
+                            "oss_key": self.tts.last_upload.get("oss_key"),
+                            "text": text,
+                        },
+                    )
+                except Exception:  # pragma: no cover - repository guard
+                    LOGGER.exception("Failed to persist TTS OSS reference for %s", sid)
+            return url
         except Exception:
             LOGGER.exception("TTS synthesis failed for %s", sid)
             return ""
