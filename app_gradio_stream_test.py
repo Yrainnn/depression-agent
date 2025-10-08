@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import ssl
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional
 
@@ -27,7 +28,7 @@ class TingwuStreamConfig:
     format: str
     language: str
     sample_rate: int
-    frame_ms: int = 40
+    frame_ms: int = 10
 
     @property
     def frame_bytes(self) -> int:
@@ -82,6 +83,8 @@ async def stream_audio_to_tingwu(
     processed_audio = _resample_if_needed(mono_audio, sample_rate, cfg.sample_rate)
     pcm_bytes = _pcm_bytes(processed_audio)
 
+    task_id: Optional[str] = None
+
     try:
         ws_url, task_id = await create_realtime_task()
     except Exception as exc:  # pylint: disable=broad-except
@@ -95,6 +98,7 @@ async def stream_audio_to_tingwu(
         "header": {
             "namespace": "SpeechTranscriber",
             "name": "StartTranscription",
+            "appkey": cfg.appkey,
         },
         "payload": {
             "format": cfg.format,
@@ -109,8 +113,30 @@ async def stream_audio_to_tingwu(
         "header": {
             "namespace": "SpeechTranscriber",
             "name": "StopTranscription",
-        }
+        },
+        "payload": {},
     }
+
+    def _extract_result_text(payload: dict) -> Optional[str]:
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if isinstance(result, str):
+            return result.strip() or None
+        if isinstance(result, dict):
+            text = result.get("text") if isinstance(result.get("text"), str) else None
+            if text:
+                return text.strip() or None
+        if isinstance(result, list):
+            texts = []
+            for item in result:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        texts.append(text.strip())
+                elif isinstance(item, str) and item.strip():
+                    texts.append(item.strip())
+            if texts:
+                return " ".join(texts)
+        return None
 
     async def receive_results(ws):  # type: ignore[no-untyped-def]
         try:
@@ -126,6 +152,18 @@ async def stream_audio_to_tingwu(
                 name = header.get("name")
                 if name:
                     print(f"📥 收到消息 {name}", flush=True)
+                    if isinstance(payload, dict) and name in {
+                        "SentenceBegin",
+                        "SentenceEnd",
+                        "TranscriptionCompleted",
+                    }:
+                        result_text = _extract_result_text(payload)
+                        log_payload = result_text or json.dumps(
+                            payload, ensure_ascii=False
+                        )
+                        log = f"🟢 {name}: {log_payload}"
+                        print(log, flush=True)
+                        await queue.put(log)
                 status = header.get("status")
                 if isinstance(status, int) and status >= 40000000:
                     detail = payload.get("message") or payload.get("error_message")
@@ -135,8 +173,9 @@ async def stream_audio_to_tingwu(
                     continue
                 text = None
                 if isinstance(payload, dict):
-                    if isinstance(payload.get("result"), str) and payload["result"].strip():
-                        text = payload["result"].strip()
+                    result_text = _extract_result_text(payload)
+                    if result_text:
+                        text = result_text
                     elif isinstance(payload.get("text"), str) and payload["text"].strip():
                         text = payload["text"].strip()
                 if text:
@@ -144,38 +183,58 @@ async def stream_audio_to_tingwu(
         except Exception as exc:  # pylint: disable=broad-except
             await queue.put(f"⚠️ WebSocket 监听中断: {exc}")
 
-    try:
-        async with websockets.connect(ws_url, ping_interval=10) as ws:
+    async def _run_with_connection(connect_kwargs: dict) -> None:
+        async with websockets.connect(ws_url, **connect_kwargs) as ws:
+            print("✅ WebSocket 已连接", flush=True)
             await queue.put("✅ WebSocket 已连接")
             await ws.send(json.dumps(start_message, ensure_ascii=False))
 
             receiver = asyncio.create_task(receive_results(ws))
             frame_size = 640
             total_frames = (len(pcm_bytes) + frame_size - 1) // frame_size
-            for frame_index in range(total_frames):
-                start = frame_index * frame_size
-                await ws.send(pcm_bytes[start : start + frame_size])
-                print(f"📤 已发送第 {frame_index + 1} 帧", flush=True)
-                await asyncio.sleep(0.01)
+            try:
+                await asyncio.sleep(0.2)
+                for frame_index in range(total_frames):
+                    start = frame_index * frame_size
+                    await ws.send(pcm_bytes[start : start + frame_size])
+                    print(f"📤 已发送第 {frame_index + 1} 帧", flush=True)
+                    if (frame_index + 1) % 100 == 0:
+                        print(
+                            f"📤 已累计发送 {frame_index + 1} 帧 (~{(frame_index + 1) * 10} ms)",
+                            flush=True,
+                        )
+                    await asyncio.sleep(0.01)
 
-            await ws.send(json.dumps(stop_message, ensure_ascii=False))
-            print("🔚 Stop 指令已发送，等待 3 秒后关闭", flush=True)
-            await asyncio.sleep(3)
-            print("🔚 Stop 完成并关闭 WebSocket", flush=True)
-            await ws.close()
+                await ws.send(json.dumps(stop_message, ensure_ascii=False))
+                print("🔚 Stop 指令已发送，等待 3 秒后关闭", flush=True)
+                await asyncio.sleep(3)
+                print("🔚 Stop 完成并关闭 WebSocket", flush=True)
+                await queue.put("🔚 Stop 完成并关闭 WebSocket")
+            finally:
+                if not receiver.done():
+                    receiver.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await receiver
 
-            if not receiver.done():
-                receiver.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await receiver
-            await queue.put("🔚 Stop 完成并关闭 WebSocket")
+    connect_kwargs = {"ping_interval": 10}
+
+    try:
+        try:
+            await _run_with_connection(connect_kwargs)
+        except Exception as exc:  # pylint: disable=broad-except
+            if "302" in str(exc):
+                connect_kwargs["ssl"] = ssl._create_unverified_context()
+                await _run_with_connection(connect_kwargs)
+            else:
+                raise
     except Exception as exc:  # pylint: disable=broad-except
         await queue.put(f"❌ 推流失败: {exc}")
     finally:
-        try:
-            await stop_realtime_task(task_id)
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"⚠️ 停止实时任务失败: {exc}", flush=True)
+        if task_id:
+            try:
+                await stop_realtime_task(task_id)
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"⚠️ 停止实时任务失败: {exc}", flush=True)
 
 
 async def start_realtime_stream(audio: Optional[tuple[int, np.ndarray]]) -> AsyncGenerator[str, None]:
