@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import audioop
+import contextlib
 import os
+import shutil
+import subprocess
+import tempfile
 import uuid
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,6 +51,104 @@ def _upload_audio(sid: str, file_path: str) -> str:
     if not audio_ref:
         raise ValueError("audio_ref missing in upload response")
     return audio_ref
+
+
+def _convert_audio_to_pcm_16k(audio_path: str) -> str:
+    if not audio_path:
+        raise ValueError("❌ 未检测到音频输入或上传失败")
+
+    source_path = Path(audio_path)
+    if not source_path.exists():
+        raise FileNotFoundError("❌ 未检测到音频输入或上传失败")
+
+    tmp_handle = tempfile.NamedTemporaryFile(delete=False, suffix=".pcm")
+    tmp_handle.close()
+    tmp_path = tmp_handle.name
+
+    try:
+        if source_path.suffix.lower() == ".pcm":
+            with open(source_path, "rb") as src, open(tmp_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            return tmp_path
+
+        if source_path.suffix.lower() != ".wav":
+            raise ValueError("仅支持 .wav 或 .pcm 格式音频")
+
+        with contextlib.closing(wave.open(str(source_path), "rb")) as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            frame_rate = wav_file.getframerate()
+            frames = wav_file.readframes(wav_file.getnframes())
+
+        if channels <= 0:
+            raise ValueError("音频通道数无效")
+
+        if sample_width != 2:
+            frames = audioop.lin2lin(frames, sample_width, 2)
+
+        if channels > 1:
+            frames = audioop.tomono(frames, 2, 1, 1)
+
+        if frame_rate != 16000:
+            frames, _ = audioop.ratecv(frames, 2, 1, frame_rate, 16000, None)
+
+        with open(tmp_path, "wb") as pcm_file:
+            pcm_file.write(frames)
+
+        return tmp_path
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _run_tingwu_client(pcm_path: str) -> str:
+    command = ["python", "-m", "services.audio.tingwu_client", pcm_path]
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, check=True
+        )
+    except subprocess.CalledProcessError as exc:  # noqa: TRY003 - surface to UI
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        message_parts = ["❌ 听悟转写失败："]
+        if stdout:
+            message_parts.append(stdout)
+        if stderr:
+            message_parts.append(stderr)
+        return "\n".join(message_parts)
+
+    output_text = (completed.stdout or "").strip()
+    if not output_text:
+        return "✅ 听悟转写完成（无返回内容）。"
+    return output_text
+
+
+def _append_transcript(existing: str, new_message: str) -> str:
+    existing = existing.strip()
+    if not existing:
+        return new_message
+    return f"{existing}\n{new_message}"
+
+
+def _handle_tingwu_audio(
+    audio_path: Optional[str], transcript: str
+) -> str:
+    transcript = transcript or ""
+    if not audio_path:
+        return _append_transcript(transcript, "❌ 未检测到音频输入或上传失败")
+
+    try:
+        pcm_path = _convert_audio_to_pcm_16k(audio_path)
+        try:
+            result_text = _run_tingwu_client(pcm_path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(pcm_path)
+    except Exception as exc:  # noqa: BLE001 - surface到UI
+        return _append_transcript(transcript, f"❌ 音频处理失败：{exc}")
+
+    return _append_transcript(transcript, result_text)
 
 
 def _generate_report(session_id: str) -> str:
@@ -140,7 +244,17 @@ def build_ui() -> gr.Blocks:
             with gr.Tab("评估"):
                 chatbot = gr.Chatbot(height=400, label="对话")
                 text_input = gr.Textbox(label="患者输入", placeholder="请输入文本")
-                audio_input = gr.File(label="上传音频(16k mono)", type="filepath")
+                audio_input = gr.Audio(
+                    label="录音/上传音频 (16k 单声道)",
+                    sources=["microphone", "upload"],
+                    type="filepath",
+                )
+                tingwu_transcript = gr.Textbox(
+                    label="听悟识别结果",
+                    value="",
+                    lines=8,
+                    interactive=False,
+                )
                 audio_sys = gr.Audio(label="系统语音", interactive=False, autoplay=True)
                 risk_alert = gr.Markdown("无紧急风险提示。")
                 progress_display = gr.JSON(label="进度状态")
@@ -190,6 +304,19 @@ def build_ui() -> gr.Blocks:
                 audio_sys,
             ],
         )
+
+        audio_input.change(
+            _handle_tingwu_audio,
+            inputs=[audio_input, tingwu_transcript],
+            outputs=[tingwu_transcript],
+        )
+
+        if hasattr(audio_input, "stop_recording"):
+            audio_input.stop_recording(
+                _handle_tingwu_audio,
+                inputs=[audio_input, tingwu_transcript],
+                outputs=[tingwu_transcript],
+            )
 
         report_button.click(
             lambda sid: _generate_report(sid),
