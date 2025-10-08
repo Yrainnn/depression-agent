@@ -178,38 +178,34 @@ async def stream_audio_to_tingwu(
             print(f"⚠️ 停止实时任务失败: {exc}", flush=True)
 
 
-def start_realtime_stream(audio: Optional[tuple[int, np.ndarray]]) -> AsyncGenerator[str, None]:
+async def start_realtime_stream(audio: Optional[tuple[int, np.ndarray]]) -> AsyncGenerator[str, None]:
     """录音回调，实时显示识别结果."""
 
     if audio is None:
-
-        async def no_audio() -> AsyncGenerator[str, None]:
-            yield "未检测到音频输入"
-
-        return no_audio()
+        yield "未检测到音频输入"
+        return
 
     sample_rate, data = audio
     queue: "asyncio.Queue[str]" = asyncio.Queue()
 
     async def run_stream() -> None:
-        await stream_audio_to_tingwu(data, sample_rate, queue)
-        await queue.put("✅ 流程结束")
-
-    async def update_output() -> AsyncGenerator[str, None]:
-        task = asyncio.create_task(run_stream())
         try:
-            while True:
-                text = await queue.get()
-                yield text
-                if any(keyword in text for keyword in ("流程结束", "失败", "中断")):
-                    break
+            await stream_audio_to_tingwu(data, sample_rate, queue)
         finally:
-            if not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+            await queue.put("✅ 流程结束")
 
-    return update_output()
+    task = asyncio.create_task(run_stream())
+    try:
+        while True:
+            text = await queue.get()
+            yield text
+            if any(keyword in text for keyword in ("流程结束", "失败", "中断")):
+                break
+    finally:
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 with gr.Blocks() as demo:
