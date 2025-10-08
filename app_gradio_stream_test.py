@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import math
-import uuid
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional
 
@@ -15,7 +13,10 @@ import numpy as np
 import websockets
 
 from packages.common.config import settings
-from services.audio.tingwu_client import create_realtime_task, stop_realtime_task
+from services.audio.tingwu_async_client import (
+    create_realtime_task,
+    stop_realtime_task,
+)
 
 
 @dataclass(slots=True)
@@ -45,7 +46,7 @@ def _build_config() -> TingwuStreamConfig:
         appkey=appkey,
         format=settings.TINGWU_FORMAT or "pcm",
         language=settings.TINGWU_LANG or "cn",
-        sample_rate=settings.TINGWU_SAMPLE_RATE or 16000,
+        sample_rate=16000,
     )
 
 
@@ -58,24 +59,17 @@ def _ensure_mono(audio_data: np.ndarray) -> np.ndarray:
 def _resample_if_needed(audio_data: np.ndarray, original_sr: int, target_sr: int) -> np.ndarray:
     if original_sr == target_sr:
         return audio_data
-    duration = audio_data.shape[0] / float(original_sr)
-    target_samples = max(int(math.ceil(duration * target_sr)), 1)
-    source_times = np.linspace(0.0, duration, num=audio_data.shape[0], endpoint=False)
-    target_times = np.linspace(0.0, duration, num=target_samples, endpoint=False)
-    return np.interp(target_times, source_times, audio_data).astype(np.float32)
+    if audio_data.size == 0:
+        return audio_data
+    original_indices = np.arange(audio_data.shape[0], dtype=np.float32)
+    target_length = max(int(round(audio_data.shape[0] * target_sr / original_sr)), 1)
+    target_indices = np.linspace(0, original_indices[-1], num=target_length, dtype=np.float32)
+    return np.interp(target_indices, original_indices, audio_data).astype(np.float32)
 
 
 def _pcm_bytes(audio_data: np.ndarray) -> bytes:
     normalized = np.clip(audio_data, -1.0, 1.0)
     return (normalized * 32767).astype("<i2").tobytes()
-
-
-def _extract_text(payload: dict) -> Optional[str]:
-    for key in ("display_text", "text", "result"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
 
 
 async def stream_audio_to_tingwu(
@@ -89,24 +83,23 @@ async def stream_audio_to_tingwu(
     pcm_bytes = _pcm_bytes(processed_audio)
 
     try:
-        ws_url, task_id = await asyncio.to_thread(create_realtime_task)
+        ws_url, task_id = await create_realtime_task()
     except Exception as exc:  # pylint: disable=broad-except
         await queue.put(f"❌ 创建听悟实时任务失败: {exc}")
         return
 
+    print(f"✅ 任务已创建 ({task_id})", flush=True)
+    await queue.put(f"✅ 任务已创建 ({task_id})")
+
     start_message = {
         "header": {
-            "namespace": "SpeechTranscription",
+            "namespace": "SpeechTranscriber",
             "name": "StartTranscription",
-            "appkey": cfg.appkey,
-            "message_id": str(uuid.uuid4()),
-            "task_id": task_id,
         },
         "payload": {
             "format": cfg.format,
             "sample_rate": cfg.sample_rate,
             "language": cfg.language,
-            "enable_intermediate_result": True,
             "enable_punctuation_prediction": True,
             "enable_inverse_text_normalization": True,
             "enable_semantic_sentence_detection": True,
@@ -114,11 +107,8 @@ async def stream_audio_to_tingwu(
     }
     stop_message = {
         "header": {
-            "namespace": "SpeechTranscription",
+            "namespace": "SpeechTranscriber",
             "name": "StopTranscription",
-            "appkey": cfg.appkey,
-            "message_id": str(uuid.uuid4()),
-            "task_id": task_id,
         }
     }
 
@@ -133,6 +123,9 @@ async def stream_audio_to_tingwu(
                     continue
                 header = message.get("header", {})
                 payload = message.get("payload", {})
+                name = header.get("name")
+                if name:
+                    print(f"📥 收到消息 {name}", flush=True)
                 status = header.get("status")
                 if isinstance(status, int) and status >= 40000000:
                     detail = payload.get("message") or payload.get("error_message")
@@ -140,35 +133,49 @@ async def stream_audio_to_tingwu(
                         f"⚠️ 听悟返回错误({status}): {detail or json.dumps(payload, ensure_ascii=False)}"
                     )
                     continue
-                text = _extract_text(payload)
-                if not text:
-                    continue
-                name = (header.get("name") or "").lower()
-                prefix = "实时识别"
-                if "sentenceend" in name or "completed" in name or "result" in name:
-                    prefix = "最终结果"
-                await queue.put(f"{prefix}: {text}")
+                text = None
+                if isinstance(payload, dict):
+                    if isinstance(payload.get("result"), str) and payload["result"].strip():
+                        text = payload["result"].strip()
+                    elif isinstance(payload.get("text"), str) and payload["text"].strip():
+                        text = payload["text"].strip()
+                if text:
+                    await queue.put(f"📝 实时识别结果：{text}")
         except Exception as exc:  # pylint: disable=broad-except
             await queue.put(f"⚠️ WebSocket 监听中断: {exc}")
 
     try:
         async with websockets.connect(ws_url, ping_interval=10) as ws:
-            await queue.put(f"✅ 已连接听悟实时任务（TaskId: {task_id}）")
+            await queue.put("✅ WebSocket 已连接")
             await ws.send(json.dumps(start_message, ensure_ascii=False))
 
             receiver = asyncio.create_task(receive_results(ws))
-            frame_bytes = max(cfg.frame_bytes, 640)
-            for idx in range(0, len(pcm_bytes), frame_bytes):
-                await ws.send(pcm_bytes[idx : idx + frame_bytes])
-                await asyncio.sleep(cfg.frame_ms / 1000.0)
+            frame_size = 640
+            total_frames = (len(pcm_bytes) + frame_size - 1) // frame_size
+            for frame_index in range(total_frames):
+                start = frame_index * frame_size
+                await ws.send(pcm_bytes[start : start + frame_size])
+                print(f"📤 已发送第 {frame_index + 1} 帧", flush=True)
+                await asyncio.sleep(0.01)
 
             await ws.send(json.dumps(stop_message, ensure_ascii=False))
-            await queue.put("🛑 音频推流完成，等待识别收尾...")
-            await receiver
+            print("🔚 Stop 指令已发送，等待 3 秒后关闭", flush=True)
+            await asyncio.sleep(3)
+            print("🔚 Stop 完成并关闭 WebSocket", flush=True)
+            await ws.close()
+
+            if not receiver.done():
+                receiver.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await receiver
+            await queue.put("🔚 Stop 完成并关闭 WebSocket")
     except Exception as exc:  # pylint: disable=broad-except
         await queue.put(f"❌ 推流失败: {exc}")
     finally:
-        await asyncio.to_thread(stop_realtime_task, task_id)
+        try:
+            await stop_realtime_task(task_id)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"⚠️ 停止实时任务失败: {exc}", flush=True)
 
 
 def start_realtime_stream(audio: Optional[tuple[int, np.ndarray]]) -> AsyncGenerator[str, None]:
