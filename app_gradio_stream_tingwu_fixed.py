@@ -12,6 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+import subprocess
+import tempfile
 from collections.abc import Awaitable
 from contextlib import suppress
 from typing import AsyncGenerator, Optional, Sequence
@@ -238,6 +241,84 @@ with gr.Blocks() as demo:
     )
     transcript = gr.Textbox(label="实时识别输出", lines=12)
     audio_in.stream(fn=_gradio_stream, inputs=audio_in, outputs=transcript)
+
+    gr.Markdown("---")
+    gr.Markdown("### 🎙️ 录音上传识别（自动调用 Tingwu 客户端）")
+    recorder = gr.Audio(
+        sources=["microphone", "upload"],
+        type="numpy",
+        streaming=False,
+        format="wav",
+        label="录音或上传音频（16 kHz 单声道）",
+    )
+
+    def _append_transcript(text: str | None, addition: str) -> str:
+        base = text or ""
+        if base and not base.endswith("\n"):
+            base += "\n"
+        return base + addition
+
+    def _process_recording(audio, current_text: str | None) -> str:
+        if audio is None:
+            return _append_transcript(current_text, "❌ 未检测到音频输入或上传失败")
+
+        if isinstance(audio, tuple):
+            sample_rate, data = audio
+        elif isinstance(audio, dict):
+            sample_rate = audio.get("sample_rate", TARGET_SAMPLE_RATE)
+            data = audio.get("data")
+        else:
+            sample_rate, data = TARGET_SAMPLE_RATE, audio
+
+        sample_rate = int(sample_rate) if sample_rate else TARGET_SAMPLE_RATE
+
+        if data is None:
+            return _append_transcript(current_text, "❌ 未检测到音频输入或上传失败")
+
+        np_data = np.asarray(data, dtype=np.float32)
+        if np_data.size == 0:
+            return _append_transcript(current_text, "❌ 未检测到音频输入或上传失败")
+
+        mono_audio = _ensure_mono(np_data)
+        resampled = _resample_to_target(mono_audio, sample_rate)
+        if resampled.size == 0:
+            return _append_transcript(current_text, "❌ 未检测到音频输入或上传失败")
+
+        pcm_bytes = _to_pcm_frames(resampled)
+        if not pcm_bytes:
+            return _append_transcript(current_text, "❌ 未检测到音频输入或上传失败")
+
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pcm") as tmp:
+                tmp.write(pcm_bytes)
+                temp_path = tmp.name
+
+            try:
+                result = subprocess.run(
+                    ["python", "-m", "services.audio.tingwu_client", temp_path],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                stdout = result.stdout.strip()
+                addition = stdout or "✅ Tingwu 客户端执行完成（无输出）"
+                return _append_transcript(current_text, addition)
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.strip() if exc.stderr else str(exc)
+                return _append_transcript(current_text, f"❌ 调用失败：{stderr}")
+            except Exception as exc:  # pragma: no cover - unexpected failure
+                return _append_transcript(current_text, f"❌ 调用失败：{exc}")
+            finally:
+                with suppress(Exception):
+                    os.remove(temp_path)
+        except Exception as exc:  # pragma: no cover - temp file failure
+            return _append_transcript(current_text, f"❌ 音频处理异常：{exc}")
+
+    recorder.change(
+        fn=_process_recording,
+        inputs=[recorder, transcript],
+        outputs=transcript,
+    )
 
 
 async def _launch() -> None:
