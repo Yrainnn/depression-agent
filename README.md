@@ -1,23 +1,31 @@
 # Depression Agent
 
-可运行的抑郁症随访助手骨架，包含 FastAPI API、Gradio UI、以及若干服务适配层。当前所有 ASR/TTS/LLM 均为 Stub 实现，方便后续替换为真实服务。
+Depression Agent 是一个针对抑郁症随访场景打造的多模态智能体框架，集成了对话编排、音频识别、语音合成、风险评估与报告生成能力。项目以可插拔的方式封装关键服务，便于在原型验证阶段快速迭代，同时为生产部署预留了稳定的扩展接口。
 
-## 目录结构
+## 核心特性
+
+- **智能体工作流**：基于 LangGraph 构建问诊 → 澄清 → 风险识别 → 总结的闭环流程，支持多轮上下文管理与任务状态追踪。
+- **前端实时转写**：Gradio UI 已对接阿里听悟（TingWu）实时转写结果，并修复了前端展示链路，可即时同步用户语音内容。
+- **灵活的模型接入**：默认提供 ASR/TTS/LLM Stub，允许按需切换到听悟、CoSyVoice、DeepSeek 等真实服务，失败时自动回退以保障体验。
+- **风险与报告能力**：内置高危关键词识别引擎与 PDF 报告生成器，可输出结构化量表评分、风险事件及随访总结。
+- **可观测性与调试**：提供健康检查、Prometheus 指标埋点、Redis 缓存抽象以及多种清理脚本，支持开发及上线阶段的运维需求。
+
+## 目录概览
 
 ```
 apps/
   api/
-    main.py            # FastAPI 应用，提供 /health /metrics 及 DM 路由
+    main.py            # FastAPI 应用，包含 /health /metrics 及 DM 路由
     router_dm.py       # 抑郁随访问答与报告构建接口
   ui-gradio/
-    app.py             # 简单的 Gradio 多模态 UI
+    app.py             # 多模态 Gradio 前端，含实时转写展示
 packages/
-  common/config.py     # 环境变量配置
+  common/config.py     # 环境变量与配置解析
 services/
-  orchestrator/        # LangGraph 最小管线
-  audio/               # ASR Stub
-  tts/                 # TTS Stub
-  llm/                 # LLM JSON 客户端 (Stub + 可切换 OpenAI 兼容接口)
+  orchestrator/        # LangGraph 最小智能体管线
+  audio/               # ASR Stub 与听悟接入实现
+  tts/                 # TTS Stub，预留真实语音合成接口
+  llm/                 # LLM JSON 客户端（Stub + OpenAI 兼容接口）
   risk/                # 风险评估引擎
   report/              # PDF 报告生成
   store/               # Redis 仓储封装
@@ -26,10 +34,10 @@ scripts/
   run_ui.sh            # 启动 Gradio UI
 ```
 
-## 快速开始
+## 快速启动
 
 ```bash
-pip install -r requirements.txt  # 如已存在
+pip install -r requirements.txt
 cp .env.example .env
 ./scripts/run_api.sh
 ./scripts/run_ui.sh
@@ -37,93 +45,84 @@ cp .env.example .env
 
 默认 API 监听 `0.0.0.0:8080`，UI 监听 `0.0.0.0:7860`。
 
-### API 验收
+### API 基础验证
 
-1. `GET /health` 返回 `{ "ok": true }`
-2. `POST /dm/step` 仅支持文本输入，返回下一轮问句与进度信息
-3. `POST /report/build` 基于当前对话生成本地 PDF 并返回 `file://` 路径
+1. `GET /health` → `{ "ok": true }`
+2. `POST /dm/step` → 基于文本输入返回下一轮问句与进度信息
+3. `POST /report/build` → 基于当前对话生成本地 PDF，并返回 `file://` 路径
 
-### API 测试示例
+### API 调试示例
 
-> 所有请求体字段已统一为 `sid`，旧的 `session_id` 不再使用。
+> 请求字段统一使用 `sid`，旧的 `session_id` 已废弃。
 
 ```bash
-# 获取首问
+# 获取首轮问句
 curl -X POST "http://127.0.0.1:8080/dm/step" \
   -H "Content-Type: application/json" \
   -d '{"sid":"demo-session","role":"user"}'
 
-# 追加一次对话轮次
+# 追加一次对话轮
 curl -X POST "http://127.0.0.1:8080/dm/step" \
   -H "Content-Type: application/json" \
   -d '{"sid":"demo-session","role":"user","text":"最近睡得不太好"}'
 
-# 测试 TTS：生成占位语音
+# 生成占位语音
 curl -X POST "http://127.0.0.1:8080/tts/say" \
   -H "Content-Type: application/json" \
   -d '{"sid":"demo-session","text":"您好，这是语音播报测试。"}'
 
-# 生成报告
+# 构建报告
 curl -X POST "http://127.0.0.1:8080/report/build" \
   -H "Content-Type: application/json" \
   -d '{"sid":"demo-session"}'
 ```
 
-在 Gradio 评估页中，每轮对话会自动播放 /dm/step 返回的 `tts_url` 对应语音。
+Gradio 前端会在评估页自动播放 `/dm/step` 返回的 `tts_url`，并呈现实时转写文本。
 
-### 组件说明
+## 组件说明
 
-- **ASR Stub**：`services/audio/asr_adapter.py` 将文本直接映射为单个分段。后续如需接入阿里云听悟（TingWu）等服务，可在此替换实现，并在 `.env` 中配置 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`TINGWU_APPKEY` 等凭据。
-- **TTS Stub**：`services/tts/tts_adapter.py` 会生成 16 kHz 单声道的占位 WAV 文件并返回 `file://` 路径，后续可替换为 CoSyVoice 或其他语音合成服务。
-- **LLM Stub**：`services/llm/json_client.py` 默认基于关键词返回结构化结果；如在 `.env` 中配置 `DEEPSEEK_API_BASE` 与 `DEEPSEEK_API_KEY`，会尝试调用兼容 `/chat/completions` 的 JSON-only 接口，失败后自动回退到 Stub。
-- **LangGraph Orchestrator**：`services/orchestrator/langgraph_min.py` 实现了最小 ask → collect_audio → llm_analyze → clarify/risk_check → advance_or_finish → summarize 的流程，最多触发两次澄清，并在检测到高风险时立即打断。
-- **风险引擎**：`services/risk/engine.py` 使用强触发关键词识别高风险事件，并写入 `risk:events`。
-- **PDF 报告**：`services/report/build.py` 使用 Jinja2 + WeasyPrint 生成临时 PDF 文件并返回本地路径。
-- **数据存储**：`services/store/repository.py` 封装 Redis 访问，默认回退到内存实现（无 Redis 环境时方便调试）。存储键包括 `session`、`score`、`transcripts`、`risk:events`、`oss:{sid}` 等。
+- **ASR（TingWu + Stub）**：`services/audio/asr_adapter.py` 默认将文本映射为单个转写分段，可切换为听悟实时接口。`.env` 中需配置 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`TINGWU_APPKEY` 等凭据。
+- **TTS Stub**：`services/tts/tts_adapter.py` 生成 16 kHz 单声道占位 WAV 文件并返回本地路径，可替换为 CoSyVoice 或其他语音合成服务。
+- **LLM 客户端**：`services/llm/json_client.py` 采用关键词规则生成结构化结果；若设置 `DEEPSEEK_API_BASE`、`DEEPSEEK_API_KEY`，将尝试调用兼容 `/chat/completions` 的 JSON-only 接口（已取消额外文本清洗流程），失败后回退到 Stub。
+- **LangGraph Orchestrator**：`services/orchestrator/langgraph_min.py` 实现问诊到总结的最小有向图流程，最多触发两次澄清，并在识别高风险时终止对话。
+- **风险评估**：`services/risk/engine.py` 识别高危关键词并写入 `risk:events`。
+- **报告生成**：`services/report/build.py` 使用 Jinja2 + WeasyPrint 生成临时 PDF。
+- **数据存储**：`services/store/repository.py` 封装 Redis 访问，默认回退至内存实现，适合本地调试。
 
-## 替换为真实服务
+## 配置真实服务
 
-- **TingWu ASR**：`services/audio/asr_adapter.py` 通过 `services/audio/tingwu_client.py` 调用阿里听悟 CreateTask → WebSocket 推流 → GetTaskInfo 流程，自动回退到 Stub。
-- **CoSyVoice TTS**：在 `services/tts/tts_adapter.py` 中调用真实语音合成接口，返回或缓存生成的语音资源。
-- **真实 LLM**：在 `.env` 配置 `DEEPSEEK_API_BASE`（可选）、`DEEPSEEK_API_KEY`，即可通过 OpenAI 兼容接口返回 JSON，或直接修改 `services/llm/json_client.py` 以适配其他供应商。`DEEPSEEK_API_BASE` 可填写 `https://api.deepseek.com` 或 `https://api.deepseek.com/v1`，客户端会自动归一化为 `/v1/chat/completions`。
+- **听悟实时识别**：`services/audio/tingwu_client.py` 封装 CreateTask → WebSocket 推流 → GetTaskInfo 流程，自动处理鉴权与重试。关键参数包括 `TINGWU_REGION`（默认 `cn-beijing`）、`TINGWU_SAMPLE_RATE`（推荐 `16000`）、`TINGWU_FORMAT`（如 `pcm`）。
+- **语音合成服务**：在 `services/tts/tts_adapter.py` 中对接实际供应商，返回可访问的音频资源或缓存路径。
+- **大语言模型**：配置 `DEEPSEEK_API_BASE`（支持 `https://api.deepseek.com` 或 `https://api.deepseek.com/v1`）与 `DEEPSEEK_API_KEY` 后，将通过 OpenAI 兼容接口返回 JSON 结果；也可修改 `services/llm/json_client.py` 以适配其他厂商。
 
-## DeepSeek JSON 评分与澄清问
+### DeepSeek JSON 评分与澄清问
 
-- 配置 `DEEPSEEK_API_BASE`、`DEEPSEEK_API_KEY` 后，系统会在问卷过程中累计会话并调用模型：
-  - 输出 HAMD-17 结构化 JSON（含 `clarify_need`）
-  - 若条目为“类型4：信息缺失”，自动生成一句中文澄清问（失败回退内置模板）
-- 提示词集中在 `services/llm/prompts.py`，可通过以下环境变量覆盖：
-  `PROMPT_HAMD17_PATH`、`PROMPT_DIAGNOSIS_PATH`、`PROMPT_MDD_JUDGMENT_PATH`、`PROMPT_CLARIFY_CN_PATH`
+开启真实 LLM 后，系统会在问卷流程中：
 
-## 接入听悟实时识别（CreateTask→WS 推流→GetTaskInfo）
+- 输出 HAMD-17 结构化 JSON（含 `clarify_need` 指示）
+- 对缺失信息条目生成中文澄清问，失败时回退到内置模板
 
-- **必要参数**：`ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`TINGWU_APPKEY`（或 `ALIBABA_TINGWU_APPKEY`）、`TINGWU_REGION`（默认 `cn-beijing`）、`TINGWU_SAMPLE_RATE`（采样率，建议 `16000`）、`TINGWU_FORMAT`（音频格式，如 `pcm`）。
-- **实时流程（项目已封装在 `services/audio/tingwu_client.py`）**：
-  1. 调用 `CreateTask` 获取会话 `record_id` 与推流地址。
-  2. 按官方文档使用 WebSocket 推流入口（默认 `wss://tingwu.aliyuncs.com/ws/v1`）发送 `start` → 音频帧 → `stop` 控制消息，推送 16 kHz 单声道音频。
-  3. 解析增量回包并在识别完成后调用 `GetTaskInfo` 拉取最终结果（离线兜底可重试该接口）。
-- **采样率与格式**：实时识别推荐 16 kHz/单声道，`TINGWU_SAMPLE_RATE=16000`、`TINGWU_FORMAT=pcm`。若使用 8 kHz 或其他压缩格式需与推流参数保持一致。
-- **限额提示**：根据官方文档，`CreateTask` QPS ≈ 20，`GetTaskInfo` QPS ≈ 100；请在批量处理或并发调用时做好限速与退避策略。
+相关提示词集中于 `services/llm/prompts.py`，可通过以下环境变量覆盖：`PROMPT_HAMD17_PATH`、`PROMPT_DIAGNOSIS_PATH`、`PROMPT_MDD_JUDGMENT_PATH`、`PROMPT_CLARIFY_CN_PATH`。
 
 ## 注意事项
 
-- 阶段一无需接入 DeepSeek 或 CoSyVoice 真接口即可跑通 ASR→问答→报告的闭环，相关环境变量预留即可。
-- 禁止引入向量检索或 RAG 依赖，所有证据均基于最近分段直接传递。
-- `.env.example` 提供了所有必要的环境变量，请根据实际部署环境调整。
+- 初始阶段无需接入真实 DeepSeek 或 CoSyVoice 服务即可跑通 ASR → 问答 → 报告流程。
+- 项目禁止引入向量检索或 RAG 依赖，所有证据基于当前会话上下文传递。
+- `.env.example` 提供了所有必要配置项，请根据部署环境调整。
 
-## 开发工具
+## 运维与调试工具
 
 - 清理指定会话缓存：`python scripts/cleanup_session.py --sid <SESSION_ID>`
-- （慎用）清空当前 Redis 数据库：`python scripts/cleanup_session.py --all` 并按提示输入 `FLUSH`
+- 清空 Redis 数据库（慎用）：`python scripts/cleanup_session.py --all` 并按照提示输入 `FLUSH`
 
 ```bash
-python /scripts/cleanup_session.py --sid demo1
-python /scripts/cleanup_session.py --all
+python scripts/cleanup_session.py --sid demo1
+python scripts/cleanup_session.py --all
 ```
 
-## Redis 配置与调优
+## Redis 配置建议
 
-- 配置 `/etc/redis/redis.conf` 时建议开启 `appendonly yes`，保留快照 `save 900 1`，如需限制内存可设置 `maxmemory-policy allkeys-lru`。
-- Redis 连接串示例（含密码）：`REDIS_URL=redis://:StrongPass@localhost:6379/0`。
-- 备份命令：`redis-cli SAVE` 或 `redis-cli BGREWRITEAOF`。
+- 在 `/etc/redis/redis.conf` 中启用 `appendonly yes`，保留 `save 900 1` 快照；如需限制内存，可设置 `maxmemory-policy allkeys-lru`。
+- 连接串示例（含密码）：`REDIS_URL=redis://:StrongPass@localhost:6379/0`。
+- 常用备份命令：`redis-cli SAVE` 或 `redis-cli BGREWRITEAOF`。
 - 常用排错命令：`redis-cli INFO`、`redis-cli SLOWLOG GET`、`redis-cli MONITOR`（开发期使用）。
