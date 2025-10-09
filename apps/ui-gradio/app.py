@@ -54,7 +54,7 @@ def _call_dm_step(
     if audio_ref:
         payload["audio_ref"] = audio_ref
 
-    response = requests.post(f"{API_BASE}/dm/step", json=payload, timeout=30)
+    response = requests.post(f"{API_BASE}/dm/step", json=payload, timeout=120)
     response.raise_for_status()
     return response.json()
 
@@ -76,9 +76,9 @@ def _generate_report(session_id: str) -> str:
 
 def user_step(
     message: str,
-    history: List[Tuple[str, str]],
+    history: List[Tuple[Optional[str], str]],
     session_id: str,
-) -> Tuple[List[Tuple[str, str]], str, Dict[str, Any], str, Optional[str]]:
+) -> Tuple[List[Tuple[Optional[str], str]], str, Dict[str, Any], str, Optional[str]]:
     message = message or ""
     text_payload = message.strip() or None
     risk_text = "无紧急风险提示。"
@@ -125,6 +125,42 @@ def user_step(
     )
 
     return history, risk_text, progress, session_id, audio_value
+
+
+def initialize_conversation(
+    session_id: str,
+) -> Tuple[List[Tuple[Optional[str], str]], str, str, Dict[str, Any], Optional[str]]:
+    """为新会话预拉取首个问题。"""
+
+    sid = session_id or _init_session()
+    history: List[Tuple[Optional[str], str]] = []
+    risk_text = "无紧急风险提示。"
+    progress: Dict[str, Any] = {}
+    audio_value: Optional[str] = None
+
+    try:
+        result = _call_dm_step(sid)
+    except Exception as exc:  # noqa: BLE001 - surface API failures to the UI
+        error_text = f"❌ 请求失败：{exc}"
+        history.append((None, error_text))
+        return history, sid, "⚠️ 初始化失败，请稍后重试。", {}, None
+
+    assistant_reply = result.get("next_utterance", "")
+    if assistant_reply:
+        history.append((None, assistant_reply))
+
+    progress = result.get("progress", {})
+    risk_flag = result.get("risk_flag", False)
+    risk_text = (
+        "⚠️ 检测到高风险，请立即寻求紧急帮助。" if risk_flag else "无紧急风险提示。"
+    )
+
+    tts_url = result.get("tts_url")
+    if tts_url:
+        audio_value = tts_url
+
+    audio_value = _ensure_audio_playable_url(sid, audio_value)
+    return history, sid, risk_text, progress, audio_value
 
 
 @dataclass(slots=True)
@@ -633,7 +669,7 @@ async def stop_transcription() -> str:
 
 async def realtime_conversation(
     audio: Optional[Tuple[int, np.ndarray]],
-    history: Optional[List[Tuple[str, str]]],
+    history: Optional[List[Tuple[Optional[str], str]]],
     session_id: str,
     risk_text: str,
     progress: Optional[Dict[str, Any]],
@@ -659,7 +695,7 @@ async def realtime_conversation(
     log_lines: List[str] = []
     if existing_log:
         log_lines.extend(existing_log.splitlines())
-    current_history: List[Tuple[str, str]] = history or []
+    current_history: List[Tuple[Optional[str], str]] = history or []
     current_session = session_id or _init_session()
     current_risk = risk_text or "无紧急风险提示。"
     current_progress: Dict[str, Any] = progress or {}
@@ -799,9 +835,16 @@ def build_ui() -> gr.Blocks:
 
         def _on_submit(
             message: str,
-            history: List[Tuple[str, str]],
+            history: List[Tuple[Optional[str], str]],
             session_id: str,
-        ) -> Tuple[List[Tuple[str, str]], str, str, str, Dict[str, Any], Optional[str]]:
+        ) -> Tuple[
+            List[Tuple[Optional[str], str]],
+            str,
+            str,
+            str,
+            Dict[str, Any],
+            Optional[str],
+        ]:
             chat, risk_text, progress, sid, audio_value = user_step(
                 message, history, session_id
             )
@@ -892,6 +935,12 @@ def build_ui() -> gr.Blocks:
             lambda sid: _generate_report(sid),
             inputs=[session_state],
             outputs=[report_status],
+        )
+
+        demo.load(
+            fn=initialize_conversation,
+            inputs=[session_state],
+            outputs=[chatbot, session_state, risk_alert, progress_display, audio_sys],
         )
 
     return demo
