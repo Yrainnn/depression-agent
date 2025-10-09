@@ -1,128 +1,174 @@
 # Depression Agent
 
-Depression Agent 是一个针对抑郁症随访场景打造的多模态智能体框架，集成了对话编排、音频识别、语音合成、风险评估与报告生成能力。项目以可插拔的方式封装关键服务，便于在原型验证阶段快速迭代，同时为生产部署预留了稳定的扩展接口。
+**Depression Agent** 是一个聚焦抑郁症随访的多模态智能体框架，目标是在临床质控标准下，提供**可控的问诊流程**、**可靠的风险提示**、以及**可复用的评估报告**。框架基于 **LangGraph** 与结构化提示工程实现：**问诊 → 澄清 → 量化评分 → 风险确认 → 总结与报告** 的闭环，并通过可插拔服务快速接入真实 **ASR（通义听悟）**、**TTS** 与 **LLM** 能力。
 
-## 核心特性
+---
 
-- **智能体工作流**：基于 LangGraph 构建问诊 → 澄清 → 风险识别 → 总结的闭环流程，支持多轮上下文管理与任务状态追踪。
-- **前端实时转写**：Gradio UI 已对接阿里听悟（TingWu）实时转写结果，并修复了前端展示链路，可即时同步用户语音内容。
-- **灵活的模型接入**：默认提供 ASR/TTS/LLM Stub，允许按需切换到听悟、CoSyVoice、DeepSeek 等真实服务，失败时自动回退以保障体验。
-- **风险与报告能力**：内置高危关键词识别引擎与 PDF 报告生成器，可输出结构化量表评分、风险事件及随访总结。
-- **可观测性与调试**：提供健康检查、Prometheus 指标埋点、Redis 缓存抽象以及多种清理脚本，支持开发及上线阶段的运维需求。
+## ✨ 核心亮点
 
-## 目录概览
+- **可控流程编排**  
+  `services/orchestrator` 使用 LangGraph 显式建模节点与边，约束澄清次数、风险终止条件与报告触发时机，确保全链路符合医疗随访 SOP。
 
-```
+- **提示工程资产化**  
+  `services/llm/prompts.py` 将 HAMD-17 评估、澄清问生成、诊断总结等提示模板模块化，支持 `.env` 覆写；配套 **DeepSeek JSON-only 通道** 与故障回退策略，保证结构化输出稳定。
+
+- **多模态协同**  
+  Gradio 前端整合 **通义听悟** 转写、TTS 播报与会话进度展示；后端在音频、文本、报告之间以统一 `sid` 贯穿，实现跨模态追踪与溯源。
+
+- **可观测与运维友好**  
+  API 暴露 `/health`、`/metrics`，提供 Redis 抽象与清理脚本，测试覆盖关键风险节点与报告链路，便于持续交付与问题定位。
+
+---
+
+## 📁 仓库结构
+
+```text
 apps/
   api/
-    main.py            # FastAPI 应用，包含 /health /metrics 及 DM 路由
-    router_dm.py       # 抑郁随访问答与报告构建接口
+    main.py                   # FastAPI 入口，含 /health、/metrics、/dm、/report 等路由
+    router_dm.py              # 对话管理与报告构建 REST 接口
+    router_asr_tingwu.py      # ✅ 通义听悟 ASR：上传、转写等 REST 接口
   ui-gradio/
-    app.py             # 多模态 Gradio 前端，含实时转写展示
+    app.py                    # 多模态前端，集成 Tingwu 转写与随访流程控制
 packages/
-  common/config.py     # 环境变量与配置解析
-services/
-  orchestrator/        # LangGraph 最小智能体管线
-  audio/               # ASR Stub 与听悟接入实现
-  tts/                 # TTS Stub，预留真实语音合成接口
-  llm/                 # LLM JSON 客户端（Stub + OpenAI 兼容接口）
-  risk/                # 风险评估引擎
-  report/              # PDF 报告生成
-  store/               # Redis 仓储封装
+  common/
+    config.py                 # 环境变量解析与配置对象
+requirements.txt              # 统一依赖声明
 scripts/
-  run_api.sh           # 启动 FastAPI
-  run_ui.sh            # 启动 Gradio UI
+  cleanup_session.py          # Redis/内存会话清理工具
+  run_api.sh                  # 启动 FastAPI 服务
+  run_ui.sh                   # 启动 Gradio 前端
+services/
+  audio/                      # ASR 接入（通义听悟 SDK / WebSocket / 文件回放）
+    tingwu_client.py          # 文件回放式实时会话（NLS SDK），支持分帧推流 .wav/.pcm
+    tingwu_async_client.py    # 异步创建/停止实时任务的封装
+  llm/                        # JSON-only LLM 客户端与提示模板
+  orchestrator/               # LangGraph 流程控制实现
+  report/                     # Jinja2 + WeasyPrint 报告生成
+  risk/                       # 高危事件识别引擎
+  store/                      # Redis 仓储封装及内存回退
+  tts/                        # 语音合成 Stub，预留真实供应商对接
+  oss/                        # ✅ OSS 上传/下载客户端：产出报告与 TTS 音频的公网 URL（下载/播放）
+tests/
+  test_deepseek_client.py
+  test_orchestrator_clarify.py
+  test_orchestrator_report.py
+  test_report_build_pdf.py
+  test_tts_adapter.py
 ```
 
-## 快速启动
+注：services/oss 负责将 PDF 报告与 TTS 语音等制品上传到对象存储并返回公网 URL，以便前端直接下载/播放。
 
-```bash
+🔁 工作流总览
+语音输入 → TingWu 转写 → LangGraph 流程控制 → LLM 结构化推理
+    → 风险评估（触发预警/提前终止） → 报告生成 → OSS 公网链接 → 前端播放/下载
+
+
+会话初始化：前端或外部系统调用 POST /dm/step；services/store 基于 sid 装载/创建上下文。
+
+采集与澄清：前端录音（或上传）→ TingWu 转写；流程根据节点状态自动进入澄清分支，限次控制。
+
+结构化推理：services/llm/json_client.py 调用（DeepSeek JSON-only 或回退）产出 HAMD-17 分项、clarify_need 与临床要点。
+
+风险监测：services/risk/engine.py 每轮扫描高危信号，联动流程（如提前终止/人工干预）。
+
+报告生成：POST /report/build 调用 Jinja2 模板渲染临床摘要、风险事件与量表评分，WeasyPrint 输出 PDF。
+
+制品分发（OSS）：services/oss/client.py 上传 PDF 与 TTS 音频，返回公网 URL；前端直接渲染下载/播放。
+
+🚀 快速开始
 pip install -r requirements.txt
 cp .env.example .env
-./scripts/run_api.sh
-./scripts/run_ui.sh
-```
+./scripts/run_api.sh          # 启动 API（默认 0.0.0.0:8080）
+./scripts/run_ui.sh           # 启动 Gradio（默认 0.0.0.0:7860）
 
-默认 API 监听 `0.0.0.0:8080`，UI 监听 `0.0.0.0:7860`。
 
-### API 基础验证
+.env.example 列出全部关键变量，请按部署环境填写。
 
-1. `GET /health` → `{ "ok": true }`
-2. `POST /dm/step` → 基于文本输入返回下一轮问句与进度信息
-3. `POST /report/build` → 基于当前对话生成本地 PDF，并返回 `file://` 路径
-
-### API 调试示例
-
-> 请求字段统一使用 `sid`，旧的 `session_id` 已废弃。
-
-```bash
+🔌 API 验证示例
+1) 对话流转（DM）
 # 获取首轮问句
-curl -X POST "http://127.0.0.1:8080/dm/step" \
-  -H "Content-Type: application/json" \
-  -d '{"sid":"demo-session","role":"user"}'
+curl -X POST "http://127.0.0.1:8080/dm/step"   -H "Content-Type: application/json"   -d '{"sid":"demo-session","role":"user"}'
 
-# 追加一次对话轮
-curl -X POST "http://127.0.0.1:8080/dm/step" \
-  -H "Content-Type: application/json" \
-  -d '{"sid":"demo-session","role":"user","text":"最近睡得不太好"}'
+# 追加一轮对话（文本）
+curl -X POST "http://127.0.0.1:8080/dm/step"   -H "Content-Type: application/json"   -d '{"sid":"demo-session","role":"user","text":"最近睡得不太好"}'
 
-# 生成占位语音
-curl -X POST "http://127.0.0.1:8080/tts/say" \
-  -H "Content-Type: application/json" \
-  -d '{"sid":"demo-session","text":"您好，这是语音播报测试。"}'
+2) 听悟转写（文件回放/离线）
+# 上传音频（WAV/PCM）
+SID=tf_demo
+AR=$(curl -s -F "sid=$SID" -F "file=@/tmp/sample16k.wav"   http://127.0.0.1:8080/asr/tingwu/upload | jq -r .audio_ref)
 
-# 构建报告
-curl -X POST "http://127.0.0.1:8080/report/build" \
-  -H "Content-Type: application/json" \
-  -d '{"sid":"demo-session"}'
-```
+# 触发转写（返回最终文本，或异步状态 + 查询接口）
+curl -s -X POST http://127.0.0.1:8080/asr/tingwu/transcribe   -H 'Content-Type: application/json'   -d "{"sid":"$SID","audio_ref":"$AR"}" | jq
 
-Gradio 前端会在评估页自动播放 `/dm/step` 返回的 `tts_url`，并呈现实时转写文本。
 
-## 组件说明
+路由在 apps/api/router_asr_tingwu.py 中实现，便于前端/第三方系统复用。
 
-- **ASR（TingWu + Stub）**：`services/audio/asr_adapter.py` 默认将文本映射为单个转写分段，可切换为听悟实时接口。`.env` 中需配置 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`TINGWU_APPKEY` 等凭据。
-- **TTS Stub**：`services/tts/tts_adapter.py` 生成 16 kHz 单声道占位 WAV 文件并返回本地路径，可替换为 CoSyVoice 或其他语音合成服务。
-- **LLM 客户端**：`services/llm/json_client.py` 采用关键词规则生成结构化结果；若设置 `DEEPSEEK_API_BASE`、`DEEPSEEK_API_KEY`，将尝试调用兼容 `/chat/completions` 的 JSON-only 接口（已取消额外文本清洗流程），失败后回退到 Stub。
-- **LangGraph Orchestrator**：`services/orchestrator/langgraph_min.py` 实现问诊到总结的最小有向图流程，最多触发两次澄清，并在识别高风险时终止对话。
-- **风险评估**：`services/risk/engine.py` 识别高危关键词并写入 `risk:events`。
-- **报告生成**：`services/report/build.py` 使用 Jinja2 + WeasyPrint 生成临时 PDF。
-- **数据存储**：`services/store/repository.py` 封装 Redis 访问，默认回退至内存实现，适合本地调试。
+3) 语音合成（TTS Stub）
+curl -X POST "http://127.0.0.1:8080/tts/say"   -H "Content-Type: application/json"   -d '{"sid":"demo-session","text":"您好，这是语音播报测试。"}'
 
-## 配置真实服务
+4) 生成报告（PDF → OSS 公网 URL）
+curl -X POST "http://127.0.0.1:8080/report/build"   -H "Content-Type: application/json"   -d '{"sid":"demo-session"}'
+# 返回: {"report_url":"https://<oss-domain>/reports/report_<sid>.pdf", ...}
 
-- **听悟实时识别**：`services/audio/tingwu_client.py` 封装 CreateTask → WebSocket 推流 → GetTaskInfo 流程，自动处理鉴权与重试。关键参数包括 `TINGWU_REGION`（默认 `cn-beijing`）、`TINGWU_SAMPLE_RATE`（推荐 `16000`）、`TINGWU_FORMAT`（如 `pcm`）。
-- **语音合成服务**：在 `services/tts/tts_adapter.py` 中对接实际供应商，返回可访问的音频资源或缓存路径。
-- **大语言模型**：配置 `DEEPSEEK_API_BASE`（支持 `https://api.deepseek.com` 或 `https://api.deepseek.com/v1`）与 `DEEPSEEK_API_KEY` 后，将通过 OpenAI 兼容接口返回 JSON 结果；也可修改 `services/llm/json_client.py` 以适配其他厂商。
+🖥️ Gradio 前端要点
 
-### DeepSeek JSON 评分与澄清问
+录音/上传音频后，前端自动转为 16 kHz 单声道 PCM，调用 Tingwu 完成转写；
 
-开启真实 LLM 后，系统会在问卷流程中：
+转写文本在页面展示，随后进入文本清洗（DeepSeek） → 问答 → 报告；
 
-- 输出 HAMD-17 结构化 JSON（含 `clarify_need` 指示）
-- 对缺失信息条目生成中文澄清问，失败时回退到内置模板
+对话页自动播放后端返回的 tts_url（可为 OSS 公网 URL）；
 
-相关提示词集中于 `services/llm/prompts.py`，可通过以下环境变量覆盖：`PROMPT_HAMD17_PATH`、`PROMPT_DIAGNOSIS_PATH`、`PROMPT_MDD_JUDGMENT_PATH`、`PROMPT_CLARIFY_CN_PATH`。
+建议 gr.Chatbot(type="messages") 以兼容后续版本。
 
-## 注意事项
+⚙️ 配置真实服务
+能力	关键文件	环境变量（示例）	说明
+听悟实时识别/文件回放	services/audio/tingwu_client.py, tingwu_async_client.py	ALIBABA_CLOUD_ACCESS_KEY_ID, ALIBABA_CLOUD_ACCESS_KEY_SECRET, ALIBABA_TINGWU_APPKEY, TINGWU_REGION, TINGWU_FORMAT=pcm, TINGWU_SAMPLE_RATE=16000	支持创建实时任务→NLS SDK 推流→收结果；也提供异步创建/停止任务封装
+LLM（JSON-only）	services/llm/json_client.py, services/llm/prompts.py	DEEPSEEK_API_BASE, DEEPSEEK_API_KEY	OpenAI 兼容 /chat/completions；异常自动回退规则引擎
+TTS	services/tts/*	（自定义，如 COSYVOICE_API_KEY）	以 Stub 为基线，可替换为供应商 SDK，返回本地或公网 URL
+OSS	services/oss/client.py	OSS_ENDPOINT, OSS_BUCKET, OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, （可选 OSS_KEY_PREFIX）	统一上传报告 & 音频制品并生成公网 URL，供前端下载/播放
 
-- 初始阶段无需接入真实 DeepSeek 或 CoSyVoice 服务即可跑通 ASR → 问答 → 报告流程。
-- 项目禁止引入向量检索或 RAG 依赖，所有证据基于当前会话上下文传递。
-- `.env.example` 提供了所有必要配置项，请根据部署环境调整。
+提示模板可通过如下环境变量覆盖：
+PROMPT_HAMD17_PATH、PROMPT_DIAGNOSIS_PATH、PROMPT_MDD_JUDGMENT_PATH、PROMPT_CLARIFY_CN_PATH。
 
-## 运维与调试工具
+✅ 测试与质量保障
+pytest
 
-- 清理指定会话缓存：`python scripts/cleanup_session.py --sid <SESSION_ID>`
-- 清空 Redis 数据库（慎用）：`python scripts/cleanup_session.py --all` 并按照提示输入 `FLUSH`
 
-```bash
-python scripts/cleanup_session.py --sid demo1
-python scripts/cleanup_session.py --all
-```
+test_orchestrator_clarify.py：验证风险/澄清分支的上限与流转行为。
 
-## Redis 配置建议
+test_deepseek_client.py：覆盖 JSON-only 提示工程与回退策略。
 
-- 在 `/etc/redis/redis.conf` 中启用 `appendonly yes`，保留 `save 900 1` 快照；如需限制内存，可设置 `maxmemory-policy allkeys-lru`。
-- 连接串示例（含密码）：`REDIS_URL=redis://:StrongPass@localhost:6379/0`。
-- 常用备份命令：`redis-cli SAVE` 或 `redis-cli BGREWRITEAOF`。
-- 常用排错命令：`redis-cli INFO`、`redis-cli SLOWLOG GET`、`redis-cli MONITOR`（开发期使用）。
+test_report_build_pdf.py：确保提示输出变化下 PDF 仍可渲染。
+
+test_tts_adapter.py、test_orchestrator_report.py：检查音频与报告链路一致性。
+
+🛠️ 运维与故障排查
+
+清理指定会话缓存：python scripts/cleanup_session.py --sid <SESSION_ID>
+
+清空 Redis（慎用）：python scripts/cleanup_session.py --all
+
+建议 Redis 配置：appendonly yes、save 900 1；内存策略可用 maxmemory-policy allkeys-lru
+
+常用排错命令：redis-cli INFO、redis-cli SLOWLOG GET、redis-cli MONITOR（开发阶段）
+
+🔒 注意事项
+
+项目不依赖 RAG；所有证据来自当前会话上下文，便于审查和复现。
+
+早期部署阶段可全链路使用 Stub 验证，逐步替换为真实服务。
+
+生产建议对接 Prometheus 采集 /metrics，并配置日志采集以监控失败率与端到端耗时。
+
+🧭 里程碑建议（可选）
+
+ 前端**实时转录（WebSocket 推流）**字幕流完善（SentenceBegin/Changed/End 即时更新）。
+
+ DeepSeek 文本清洗提示词迭代 & 标注场景上线。
+
+ TTS 供应商接入与缓存策略。
+
+ 报告模板国际化与导出渠道（邮件/OSS/CDN）。
+
+License：根据你的项目策略补充（MIT / Apache-2.0 / 私有）。
