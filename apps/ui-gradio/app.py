@@ -199,6 +199,7 @@ def _iter_frames(pcm_bytes: bytes) -> List[bytes]:
 def _extract_text(payload: Dict[str, Any]) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
+
     result = payload.get("result")
     if isinstance(result, str) and result.strip():
         return result.strip()
@@ -206,8 +207,42 @@ def _extract_text(payload: Dict[str, Any]) -> Optional[str]:
         text = result.get("text")
         if isinstance(text, str) and text.strip():
             return text.strip()
+
+        sentences = result.get("sentences")
+        if isinstance(sentences, list):
+            joined = "".join(
+                sentence.get("text", "")
+                for sentence in sentences
+                if isinstance(sentence, dict)
+                and isinstance(sentence.get("text"), str)
+            ).strip()
+            if joined:
+                return joined
+
     if isinstance(payload.get("text"), str) and payload["text"].strip():
         return payload["text"].strip()
+
+    sentences = payload.get("sentences")
+    if isinstance(sentences, list):
+        joined = "".join(
+            sentence.get("text", "")
+            for sentence in sentences
+            if isinstance(sentence, dict)
+            and isinstance(sentence.get("text"), str)
+        ).strip()
+        if joined:
+            return joined
+
+    words = payload.get("words")
+    if isinstance(words, list):
+        joined = "".join(
+            word.get("text", "")
+            for word in words
+            if isinstance(word, dict) and isinstance(word.get("text"), str)
+        ).strip()
+        if joined:
+            return joined
+
     return None
 
 
@@ -303,7 +338,16 @@ async def _stream_realtime_audio(
                                     await queue.put(f"📥 收到事件：{name}")
                                 text = _extract_text(payload)
                                 if text:
-                                    await queue.put(f"📝 实时识别：{text}")
+                                    prefix = "📝 实时识别"
+                                    if name == "TranscriptionResultChanged":
+                                        prefix = "🔄 中间识别"
+                                    elif name in {
+                                        "TranscriptionResult",
+                                        "SentenceEnd",
+                                        "TranscriptionCompleted",
+                                    }:
+                                        prefix = "✅ 最终识别"
+                                    await queue.put(f"{prefix}：{text}")
                         except websockets.ConnectionClosedOK:
                             await queue.put("🔚 WebSocket 正常关闭。")
                         except Exception as exc:  # pragma: no cover
@@ -324,21 +368,12 @@ async def _stream_realtime_audio(
                     recv_task = asyncio.create_task(recv_loop())
                     heartbeat_task = asyncio.create_task(heartbeat_loop())
 
-                    done, pending = await asyncio.wait(
-                        {send_task, recv_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for task in pending:
-                        task.cancel()
-                    heartbeat_task.cancel()
-                    with contextlib.suppress(Exception):
-                        await asyncio.gather(*pending, return_exceptions=True)
-                    with contextlib.suppress(Exception):
-                        await heartbeat_task
-                    for task in done:
-                        exc = task.exception()
-                        if exc:
-                            raise exc
+                    try:
+                        await asyncio.gather(send_task, recv_task)
+                    finally:
+                        heartbeat_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await heartbeat_task
                     break
             except Exception as exc:  # pragma: no cover - connection failure
                 await queue.put(f"❌ WebSocket 连接失败：{exc}")
@@ -374,13 +409,16 @@ async def realtime_stream_to_frontend(
             await queue.put(sentinel)
 
     worker = asyncio.create_task(runner())
+    log_lines: List[str] = []
+
     try:
         while True:
             message = await queue.get()
             if message is sentinel:
                 break
             if isinstance(message, str):
-                yield message
+                log_lines.append(message)
+                yield "\n".join(log_lines)
     finally:
         if not worker.done():
             worker.cancel()
