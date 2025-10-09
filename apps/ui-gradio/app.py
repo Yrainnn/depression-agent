@@ -541,6 +541,7 @@ def handle_complete_sentence(sentence: str) -> None:
 
     print(f"🎯 [问答流程] 收到完整句子: {sentence}")
 
+        self.connection_attempts += 1
 
 def get_latest_complete_sentence() -> Optional[str]:
     if _complete_sentences:
@@ -811,6 +812,57 @@ def build_ui() -> gr.Blocks:
                             """
                         )
 
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 控制面板")
+                        mic = gr.Audio(
+                            sources=["microphone"],
+                            type="numpy",
+                            streaming=True,
+                            label="🎙️ 麦克风输入 (16kHz 单声道)",
+                            show_download_button=False,
+                        )
+                        stop_btn = gr.Button("🛑 停止转录", variant="stop", size="lg")
+
+                        with gr.Accordion("📝 完整句子（问答流程依据）", open=False):
+                            latest_sentence = gr.Textbox(
+                                label="最新完整句子",
+                                lines=2,
+                                placeholder="这里将显示最新的完整句子...",
+                                interactive=False,
+                            )
+                            all_sentences = gr.Textbox(
+                                label="所有完整句子",
+                                lines=5,
+                                placeholder="这里将显示全部完整句子...",
+                                interactive=False,
+                            )
+                            with gr.Row():
+                                refresh_btn = gr.Button("🔄 刷新句子列表", size="sm")
+                                clear_btn = gr.Button("🗑️ 清空句子列表", size="sm")
+
+                        gr.Markdown(
+                            """
+                            **提示：**
+                            - 建议在安静环境下发言，保持语速适中
+                            - 系统会自动发送静音包维持连接
+                            - DeepSeek 会自动清洗识别句子
+                            - 清洗后的句子已同步至评估问答流程
+                            """
+                        )
+
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 实时字幕")
+                        realtime_output = gr.Textbox(
+                            label="识别结果",
+                            lines=15,
+                            max_lines=20,
+                            show_copy_button=True,
+                            autoscroll=True,
+                            placeholder="识别结果将实时显示在这里...",
+                            elem_id="realtime_output",
+                        )
+
             with gr.Tab("报告"):
                 gr.Markdown("## 生成评估报告")
                 gr.Markdown("点击按钮后将在 /tmp/depression_agent_reports/ 下生成 PDF。")
@@ -822,7 +874,7 @@ def build_ui() -> gr.Blocks:
             audio_path: Optional[str],
             history: List[Tuple[str, str]],
             session_id: str,
-        ) -> Tuple[List[Tuple[str, str]], str, Optional[str], str, str, Dict[str, Any], Optional[str]]:
+        ) -> Tuple[List[Tuple[str, str]], str, Optional[str], str, str, Dict[str, Any], Optional[Any]]:
             chat, risk_text, progress, sid, audio_value = user_step(
                 message, audio_path, history, session_id
             )
@@ -927,4 +979,4 @@ if __name__ == "__main__":
         "🔑 听悟 AppKey: ",
         settings.TINGWU_APPKEY or settings.ALIBABA_TINGWU_APPKEY or "未配置",
     )
-    build_ui().launch(server_name="0.0.0.0", server_port=7860)
+    build_ui().launch(server_name="0.0.0.0", server_port=8001)
