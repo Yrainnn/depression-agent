@@ -59,21 +59,6 @@ def _call_dm_step(
     return response.json()
 
 
-def _upload_audio(sid: str, file_path: str) -> str:
-    url = f"{API_BASE}/upload/audio"
-    file_name = Path(file_path).name or "audio.wav"
-    with open(file_path, "rb") as handle:
-        files = {"file": (file_name, handle, "application/octet-stream")}
-        data = {"sid": sid}
-        response = requests.post(url, files=files, data=data, timeout=60)
-    response.raise_for_status()
-    payload = response.json()
-    audio_ref = payload.get("audio_ref")
-    if not audio_ref:
-        raise ValueError("audio_ref missing in upload response")
-    return audio_ref
-
-
 def _generate_report(session_id: str) -> str:
     try:
         resp = requests.post(
@@ -91,29 +76,20 @@ def _generate_report(session_id: str) -> str:
 
 def user_step(
     message: str,
-    audio_path: Optional[str],
     history: List[Tuple[str, str]],
     session_id: str,
 ) -> Tuple[List[Tuple[str, str]], str, Dict[str, Any], str, Optional[str]]:
     message = message or ""
     text_payload = message.strip() or None
-    audio_ref: Optional[str] = None
     risk_text = "无紧急风险提示。"
     progress: Dict[str, Any] = {}
     audio_value: Optional[str] = None
 
     try:
-        if audio_path:
-            audio_ref = _upload_audio(session_id, audio_path)
-            if not text_payload:
-                text_payload = None
-
-        result = _call_dm_step(session_id, text=text_payload, audio_ref=audio_ref)
+        result = _call_dm_step(session_id, text=text_payload, audio_ref=None)
     except Exception as exc:  # noqa: BLE001 - surface API failures to the UI
         if text_payload:
             user_label = message
-        elif audio_path:
-            user_label = f"[音频] {Path(audio_path).name}"
         else:
             user_label = "[空输入]"
 
@@ -140,13 +116,7 @@ def user_step(
     user_label: Optional[str] = None
     if text_payload:
         user_label = message
-    elif audio_path:
-        user_label = f"[音频] {Path(audio_path).name}"
-
-    if user_label:
-        history = history + [(user_label, assistant_reply)]
-    else:
-        history = history + [(None, assistant_reply)]
+    history = history + [(user_label or None, assistant_reply)]
 
     progress = result.get("progress", {})
     risk_flag = result.get("risk_flag", False)
@@ -532,29 +502,32 @@ class RealTimeTingwuClient:
 
 _client: Optional[RealTimeTingwuClient] = None
 _client_lock = threading.Lock()
-_complete_sentences: List[str] = []
+_complete_sentences: List[str] = []  # 保存听悟返回的原始完整句子
+_cleaned_sentences: List[str] = []  # 保存清洗后的完整句子
 _oss_client = OSSClient()
 
 
 def handle_complete_sentence(sentence: str) -> None:
     """接收听悟返回的完整句子（原始文本）。"""
 
+    global _complete_sentences
+    _complete_sentences.append(sentence)
     print(f"🎯 [问答流程] 收到完整句子: {sentence}")
 
-        self.connection_attempts += 1
 
 def get_latest_complete_sentence() -> Optional[str]:
-    if _complete_sentences:
-        return _complete_sentences[-1]
+    if _cleaned_sentences:
+        return _cleaned_sentences[-1]
     return None
 
 
 def get_all_complete_sentences() -> List[str]:
-    return _complete_sentences.copy()
+    return _cleaned_sentences.copy()
 
 
 def clear_complete_sentences() -> None:
     _complete_sentences.clear()
+    _cleaned_sentences.clear()
 
 
 def _format_sentences_display(sentences: List[str]) -> str:
@@ -705,10 +678,20 @@ async def realtime_conversation(
             cleaned_sentence = await _clean_sentence(raw_sentence)
             if not cleaned_sentence:
                 continue
-            _complete_sentences.append(cleaned_sentence)
+            _cleaned_sentences.append(cleaned_sentence)
             latest_sentence_cached = cleaned_sentence
-            all_sentences_cached = _format_sentences_display(_complete_sentences)
+            all_sentences_cached = _format_sentences_display(_cleaned_sentences)
             log_lines.append(f"🤖 清洗后进入问答：{cleaned_sentence}")
+            yield (
+                "\n".join(log_lines[-200:]),
+                current_history,
+                current_risk,
+                current_progress,
+                current_audio,
+                current_session,
+                latest_sentence_cached,
+                all_sentences_cached,
+            )
             try:
                 (
                     current_history,
@@ -719,7 +702,6 @@ async def realtime_conversation(
                 ) = await asyncio.to_thread(
                     user_step,
                     cleaned_sentence,
-                    None,
                     current_history,
                     current_session,
                 )
@@ -764,12 +746,9 @@ def build_ui() -> gr.Blocks:
                         text_input = gr.Textbox(
                             label="患者文本输入", placeholder="请输入文本信息"
                         )
-                        audio_input = gr.File(
-                            label="上传音频 (16kHz 单声道)", type="filepath"
-                        )
-                        send_button = gr.Button("发送文本/音频", variant="primary")
+                        send_button = gr.Button("发送文本", variant="primary")
                         gr.Markdown(
-                            "提示：可手动输入文本或上传录音文件，系统会同步更新问答。"
+                            "提示：可手动输入文本，系统会同步更新问答。"
                         )
 
                     with gr.Column(scale=2):
@@ -812,57 +791,6 @@ def build_ui() -> gr.Blocks:
                             """
                         )
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        gr.Markdown("### 控制面板")
-                        mic = gr.Audio(
-                            sources=["microphone"],
-                            type="numpy",
-                            streaming=True,
-                            label="🎙️ 麦克风输入 (16kHz 单声道)",
-                            show_download_button=False,
-                        )
-                        stop_btn = gr.Button("🛑 停止转录", variant="stop", size="lg")
-
-                        with gr.Accordion("📝 完整句子（问答流程依据）", open=False):
-                            latest_sentence = gr.Textbox(
-                                label="最新完整句子",
-                                lines=2,
-                                placeholder="这里将显示最新的完整句子...",
-                                interactive=False,
-                            )
-                            all_sentences = gr.Textbox(
-                                label="所有完整句子",
-                                lines=5,
-                                placeholder="这里将显示全部完整句子...",
-                                interactive=False,
-                            )
-                            with gr.Row():
-                                refresh_btn = gr.Button("🔄 刷新句子列表", size="sm")
-                                clear_btn = gr.Button("🗑️ 清空句子列表", size="sm")
-
-                        gr.Markdown(
-                            """
-                            **提示：**
-                            - 建议在安静环境下发言，保持语速适中
-                            - 系统会自动发送静音包维持连接
-                            - DeepSeek 会自动清洗识别句子
-                            - 清洗后的句子已同步至评估问答流程
-                            """
-                        )
-
-                    with gr.Column(scale=2):
-                        gr.Markdown("### 实时字幕")
-                        realtime_output = gr.Textbox(
-                            label="识别结果",
-                            lines=15,
-                            max_lines=20,
-                            show_copy_button=True,
-                            autoscroll=True,
-                            placeholder="识别结果将实时显示在这里...",
-                            elem_id="realtime_output",
-                        )
-
             with gr.Tab("报告"):
                 gr.Markdown("## 生成评估报告")
                 gr.Markdown("点击按钮后将在 /tmp/depression_agent_reports/ 下生成 PDF。")
@@ -871,23 +799,21 @@ def build_ui() -> gr.Blocks:
 
         def _on_submit(
             message: str,
-            audio_path: Optional[str],
             history: List[Tuple[str, str]],
             session_id: str,
-        ) -> Tuple[List[Tuple[str, str]], str, Optional[str], str, str, Dict[str, Any], Optional[Any]]:
+        ) -> Tuple[List[Tuple[str, str]], str, str, str, Dict[str, Any], Optional[str]]:
             chat, risk_text, progress, sid, audio_value = user_step(
-                message, audio_path, history, session_id
+                message, history, session_id
             )
             playable_audio = _ensure_audio_playable_url(sid, audio_value)
-            return chat, "", None, sid, risk_text, progress, playable_audio
+            return chat, "", sid, risk_text, progress, playable_audio
 
         text_input.submit(
             _on_submit,
-            inputs=[text_input, audio_input, chatbot, session_state],
+            inputs=[text_input, chatbot, session_state],
             outputs=[
                 chatbot,
                 text_input,
-                audio_input,
                 session_state,
                 risk_alert,
                 progress_display,
@@ -897,11 +823,10 @@ def build_ui() -> gr.Blocks:
 
         send_button.click(
             _on_submit,
-            inputs=[text_input, audio_input, chatbot, session_state],
+            inputs=[text_input, chatbot, session_state],
             outputs=[
                 chatbot,
                 text_input,
-                audio_input,
                 session_state,
                 risk_alert,
                 progress_display,
@@ -979,4 +904,4 @@ if __name__ == "__main__":
         "🔑 听悟 AppKey: ",
         settings.TINGWU_APPKEY or settings.ALIBABA_TINGWU_APPKEY or "未配置",
     )
-    build_ui().launch(server_name="0.0.0.0", server_port=8001)
+    build_ui().launch(server_name="0.0.0.0", server_port=7860)
