@@ -796,100 +796,369 @@ def poll_sentences():
     """轮询句子状态"""
     return get_current_sentences()
 
+def _get_progress_value(progress: Dict[str, Any]) -> float:
+    """从进度字典中提取进度值 - 修复版本"""
+    if not progress:
+        return 0.0
+    
+    print(f"📊 原始进度数据: {progress}")  # 调试信息
+    
+    # 处理 {'index': 1, 'total': 17} 这种格式
+    if "index" in progress and "total" in progress:
+        index = progress["index"]
+        total = progress["total"]
+        if total > 0:
+            value = (index / total) * 100.0
+            print(f"📊 计算进度: {index}/{total} = {value:.1f}%")
+            return value
+    
+    # 尝试从不同字段中提取进度
+    if "overall" in progress:
+        value = progress["overall"]
+        if isinstance(value, (int, float)):
+            print(f"📊 使用 overall 字段: {value}")
+            return float(value)
+    
+    if "progress" in progress:
+        value = progress["progress"]
+        if isinstance(value, (int, float)):
+            print(f"📊 使用 progress 字段: {value}")
+            return float(value)
+    
+    if "percentage" in progress:
+        value = progress["percentage"]
+        if isinstance(value, (int, float)):
+            print(f"📊 使用 percentage 字段: {value}")
+            return float(value)
+    
+    if "current_step" in progress and "total_steps" in progress:
+        current = progress["current_step"]
+        total = progress["total_steps"]
+        if total > 0:
+            value = (current / total) * 100.0
+            print(f"📊 计算进度: {current}/{total} = {value:.1f}%")
+            return value
+    
+    print("📊 未找到有效进度信息，使用默认值 0%")
+    return 0.0
+
+def _get_progress_label(progress: Dict[str, Any]) -> str:
+    """生成进度标签文本 - 增强版本"""
+    if not progress:
+        return "评估准备中..."
+    
+    # 处理 {'index': 1, 'total': 17} 这种格式
+    if "index" in progress and "total" in progress:
+        index = progress["index"]
+        total = progress["total"]
+        return f"问题 {index}/{total}"
+    
+    current_step = progress.get("current_step", 0)
+    total_steps = progress.get("total_steps", 0)
+    phase = progress.get("phase", "评估中")
+    
+    # 定义评估阶段描述
+    phase_descriptions = {
+        "initial": "初始评估",
+        "symptom": "症状筛查", 
+        "risk": "风险评估",
+        "followup": "深度问询",
+        "summary": "结果汇总",
+        "report": "报告生成"
+    }
+    
+    phase_desc = phase_descriptions.get(phase, phase)
+    
+    if total_steps > 0:
+        return f"{phase_desc} ({current_step}/{total_steps})"
+    elif current_step > 0:
+        return f"{phase_desc} (第{current_step}步)"
+    else:
+        return f"{phase_desc}"
+
 
 def build_ui() -> gr.Blocks:
-    """优化的 Gradio 界面 - 专注于稳定性"""
-    with gr.Blocks(theme=gr.themes.Soft(), title="抑郁随访助手") as demo:
+    """优化的 Gradio 界面 - 修复进度条问题"""
+    with gr.Blocks(
+        theme=gr.themes.Soft(primary_hue="blue", secondary_hue="slate"),
+        title="智能心境健康评估系统",
+        css="""
+        .gradio-container {
+            max-width: 100% !important;
+            width: 100% !important;
+            background: #e8f4f8 !important;  /* 使用浅灰色纯色背景 */
+            /* 或者使用白色背景：background: #ffffff !important; */
+            /* 或者如果还想保留图片：background: url('https://images.unsplash.com/photo-1559757148-5c350d0d3c56?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=2070&q=80') !important; */
+            background-size: cover !important;
+            background-attachment: fixed !important;
+            min-height: 100vh !important;
+        }
+        .container {
+            max-width: 100% !important;
+            width: 100% !important;
+        }
+        .progress-section {
+            background: rgba(255, 255, 255, 0.95) !important;
+            padding: 15px;
+            border-radius: 10px;
+            color: #333;
+            margin-bottom: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.8);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        .risk-alert {
+            padding: 12px;
+            border-radius: 8px;
+            margin: 8px 0;
+            font-weight: bold;
+        }
+        .risk-high {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+            color: white;
+            border: 2px solid #ff3838;
+        }
+        .risk-low {
+            background: linear-gradient(135deg, #4ecdc4 0%, #44a08d 100%);
+            color: white;
+            border: 2px solid #00b894;
+        }
+        .section-title {
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
+            font-size: 1.3em;
+            margin-bottom: 12px;
+        }
+        .chatbot-container {
+            min-height: 450px;
+        }
+        /* 内容区域背景 */
+        .block, .panel, .form, .tab-nav, .tab-content {
+            background: rgba(255, 255, 255, 0.92) !important;
+            backdrop-filter: blur(10px);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+        }
+        /* 输入框和按钮样式 */
+        .gr-textbox, .gr-button, .gr-slider, .gr-audio, .gr-chatbot {
+            background: rgba(255, 255, 255, 0.95) !important;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        .gr-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+            color: white !important;
+            border: none !important;
+        }
+        .gr-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+        /* 标签页样式 */
+        .tab-nav button {
+            background: rgba(255, 255, 255, 0.9) !important;
+            border-radius: 8px 8px 0 0;
+            margin-right: 4px;
+        }
+        .tab-nav button.selected {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+            color: white !important;
+        }
+        /* 标题区域 */
+        .title-container {
+            background: rgba(255, 255, 255, 0.95) !important;
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.6);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+        }
+        """
+    ) as demo:
         session_state = gr.State(_init_session())
 
+        # 专业生动的标题区域 - 添加背景容器
         gr.Markdown(
             """
-            # 抑郁随访助手
-            集成文本/音频问答与实时语音识别，完成自动随访与报告。
+            <div class="title-container">
+                <div style="text-align: center; padding: 10px 0;">
+                    <h1 style="
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        -webkit-background-clip: text;
+                        -webkit-text-fill-color: transparent;
+                        font-weight: 800;
+                        font-size: 2.2em;
+                        margin-bottom: 8px;
+                    ">
+                        🧠 智能心境健康评估系统
+                    </h1>
+                    <p style="
+                        color: #666;
+                        font-size: 1.1em;
+                        margin-bottom: 15px;
+                        font-weight: 500;
+                    ">
+                        融合多模态交互的精准心理健康筛查与智能随访平台
+                    </p>
+                </div>
+            </div>
             """
         )
 
         with gr.Tabs():
-            with gr.Tab("评估"):
-                chatbot = gr.Chatbot(height=420, label="对话记录", show_copy_button=True)
-
-                with gr.Row():
-                    with gr.Column(scale=3):
-                        risk_alert = gr.Markdown("无紧急风险提示。")
-                        progress_display = gr.JSON(label="进度状态")
-                        audio_sys = gr.Audio(
-                            label="系统语音播放", interactive=False, autoplay=True
+            with gr.Tab("🏥 专业评估"):
+                # 使用更紧凑的布局，调整左右比例
+                with gr.Row(equal_height=True):
+                    # 左侧主对话区域 - 调整为更宽的比例
+                    with gr.Column(scale=7, min_width=600):  # 增加scale值使左侧更宽
+                        chatbot = gr.Chatbot(
+                            height=450,
+                            label="智能对话记录",
+                            show_copy_button=True,
+                            elem_classes="chatbot-container"
                         )
+
+                        # 进度条显示区域 - 只保留一个进度条
+                        progress_bar = gr.Slider(
+                            label="评估进度",
+                            minimum=0,
+                            maximum=100,
+                            value=0,
+                            interactive=False,
+                            show_label=True,
+                            info="当前评估完成度"
+                        )
+                        
+                        risk_alert = gr.Markdown(
+                            """
+                            <div class="risk-alert risk-low">
+                                ✅ 当前状态：无紧急风险提示
+                            </div>
+                            """
+                        )
+                        
+                        audio_sys = gr.Audio(
+                            label="系统语音反馈",
+                            interactive=False,
+                            autoplay=True
+                        )
+                        
                         text_input = gr.Textbox(
-                            label="患者文本输入", placeholder="请输入文本信息"
+                            label="患者自述输入",
+                            placeholder="请详细描述您近期的情绪状态、睡眠质量、生活压力等情况...",
+                            lines=4,
+                            max_lines=6,
+                            show_copy_button=True
                         )
                         
                         with gr.Row():
-                            send_button = gr.Button("发送文本", variant="primary")
-                            clear_chat_btn = gr.Button("清空对话", variant="secondary")
+                            send_button = gr.Button("📤 提交评估", variant="primary", size="lg")
+                            clear_chat_btn = gr.Button("🔄 重新开始", variant="secondary")
                         
                         gr.Markdown(
-                            "提示：可手动输入文本，系统会同步更新问答。"
+                            """
+                            **💡 专业提示：**
+                            - 请尽可能详细描述您的真实感受
+                            - 系统会严格保密您的所有信息
+                            - 如需紧急帮助，请立即联系专业医生
+                            """
                         )
 
-                    with gr.Column(scale=2):
-                        gr.Markdown("### 🎧 实时语音识别")
-                        
-                        with gr.Row():
-                            start_mic_btn = gr.Button("🎤 开始录音", variant="primary")
-                            stop_mic_btn = gr.Button("🛑 停止录音", variant="stop")
-                        
-                        realtime_output = gr.Textbox(
-                            label="实时识别状态",
-                            lines=4,
-                            show_copy_button=True,
-                            interactive=False,
-                            value="点击'开始录音'启动语音识别"
+                    # 右侧语音识别区域 - 调整为更窄的比例
+                    with gr.Column(scale=4, min_width=400):  # 减小scale值使右侧更窄
+                        gr.Markdown(
+                            """
+                            <div class="section-title">
+                                🎤 智能语音识别
+                            </div>
+                            """
                         )
                         
-                        # 添加音频输入组件
+                        with gr.Row():
+                            start_mic_btn = gr.Button(
+                                "🎙️ 开始语音输入", 
+                                variant="primary",
+                                size="lg"
+                            )
+                            stop_mic_btn = gr.Button(
+                                "⏹️ 停止录音", 
+                                variant="stop"
+                            )
+                        
+                        realtime_output = gr.Textbox(
+                            label="实时转录状态",
+                            lines=3,  # 减少行数
+                            show_copy_button=True,
+                            interactive=False,
+                            value="点击上方按钮开始语音输入",
+                            placeholder="语音识别结果将实时显示在这里..."
+                        )
+                        
+                        # 音频输入组件
                         audio_input = gr.Audio(
                             sources=["microphone"],
                             type="numpy",
                             streaming=True,
-                            label="实时音频输入",
-                            show_download_button=False,
-                            show_share_button=False,
+                            label="实时音频采集"
                         )
                         
-                        with gr.Accordion("📝 完整句子", open=True):
+                        with gr.Accordion("📝 语音识别结果", open=True):
                             latest_sentence = gr.Textbox(
-                                label="最新完整句子",
+                                label="最新识别内容",
                                 lines=2,
                                 interactive=False,
-                                placeholder="暂无完整句子",
+                                placeholder="完整句子将自动显示在这里...",
+                                show_copy_button=True
                             )
                             all_sentences = gr.Textbox(
-                                label="全部完整句子",
-                                lines=4,
+                                label="历史识别记录",
+                                lines=3,  # 减少行数
                                 interactive=False,
-                                placeholder="暂无完整句子",
+                                placeholder="所有识别结果将汇总在这里...",
+                                show_copy_button=True
                             )
                             with gr.Row():
-                                submit_sentence_btn = gr.Button("🚀 提交此句子", variant="primary")
+                                submit_sentence_btn = gr.Button(
+                                    "🚀 提交此内容", 
+                                    variant="primary",
+                                    size="sm"
+                                )
                                 refresh_btn = gr.Button("🔄 刷新", size="sm")
-                                clear_btn = gr.Button("🗑️ 清空", size="sm")
+                                clear_btn = gr.Button("🗑️ 清空记录", size="sm")
                         
                         gr.Markdown(
                             """
-                            **使用说明:**
-                            1. 点击 **开始录音** 启动语音识别
-                            2. 说话时可以看到实时转录结果
-                            3. 完整句子会自动显示在上方区域
-                            4. 点击 **提交此句子** 将句子发送给AI助手
-                            5. 点击 **停止录音** 结束识别
+                            **🎯 语音使用指南：**
+                            1. 点击 **开始语音输入** 启动语音识别
+                            2. 用自然语言描述您的情况
+                            3. 系统会实时显示识别结果
+                            4. 完整句子会自动提交给AI分析
+                            5. 点击 **停止录音** 结束语音输入
                             """
                         )
 
-            with gr.Tab("报告"):
-                gr.Markdown("## 生成评估报告")
-                gr.Markdown("点击按钮后将在 /tmp/depression_agent_reports/ 下生成 PDF。")
-                report_button = gr.Button("生成报告")
+            with gr.Tab("📊 评估报告"):
+                gr.Markdown(
+                    """
+                    <div class="section-title">
+                        📈 专业评估报告
+                    </div>
+                    """
+                )
+                gr.Markdown(
+                    """
+                    **系统将基于对话内容生成专业评估报告，包括：**
+                    - 📋 综合心理状态分析
+                    - 📊 风险评估等级
+                    - 💡 个性化建议方案
+                    - 🏥 专业转诊指引
+                    """
+                )
+                with gr.Row():
+                    report_button = gr.Button("生成专业报告", variant="primary", size="lg")
                 report_status = gr.Markdown("等待生成指令…")
 
         # 文本输入处理
@@ -902,14 +1171,36 @@ def build_ui() -> gr.Blocks:
             str,
             str,
             str,
-            Dict[str, Any],
+            float,
             Optional[str],
         ]:
             chat, risk_text, progress, sid, audio_value = user_step(
                 message, history, session_id
             )
             playable_audio = _ensure_audio_playable_url(sid, audio_value)
-            return chat, "", sid, risk_text, progress, playable_audio
+            
+            # 处理进度显示 - 修复版本
+            progress_value = _get_progress_value(progress)
+            progress_label = _get_progress_label(progress)
+            
+            # 设置进度条标签
+            progress_bar_label = f"评估进度 - {progress_label}"
+            
+            # 处理风险提示样式
+            if "高风险" in risk_text:
+                risk_display = f"""
+                <div class="risk-alert risk-high">
+                    ⚠️ {risk_text}
+                </div>
+                """
+            else:
+                risk_display = f"""
+                <div class="risk-alert risk-low">
+                    ✅ {risk_text}
+                </div>
+                """
+            
+            return chat, "", sid, risk_display, progress_value, playable_audio
 
         text_input.submit(
             _on_submit,
@@ -919,7 +1210,7 @@ def build_ui() -> gr.Blocks:
                 text_input,
                 session_state,
                 risk_alert,
-                progress_display,
+                progress_bar,
                 audio_sys,
             ],
         )
@@ -932,18 +1223,23 @@ def build_ui() -> gr.Blocks:
                 text_input,
                 session_state,
                 risk_alert,
-                progress_display,
+                progress_bar,
                 audio_sys,
             ],
         )
 
         # 清空对话
         def clear_chat():
-            return [], _init_session(), "无紧急风险提示。", {}, None
+            new_session = _init_session()
+            return [], new_session, """
+            <div class="risk-alert risk-low">
+                ✅ 当前状态：无紧急风险提示
+            </div>
+            """, 0, None
 
         clear_chat_btn.click(
             fn=clear_chat,
-            outputs=[chatbot, session_state, risk_alert, progress_display, audio_sys]
+            outputs=[chatbot, session_state, risk_alert, progress_bar, audio_sys]
         )
 
         # 实时语音识别控制
@@ -974,7 +1270,7 @@ def build_ui() -> gr.Blocks:
         # 清空句子
         def clear_sentences_action() -> Tuple[str, str]:
             clear_complete_sentences()
-            return "已清空", "已清空"
+            return "已清空记录", "已清空记录"
 
         clear_btn.click(
             fn=clear_sentences_action,
@@ -988,7 +1284,7 @@ def build_ui() -> gr.Blocks:
         ) -> Tuple[
             List[Tuple[Optional[str], str]],
             str,
-            Dict[str, Any],
+            float,
             str,
             Optional[str],
             str,  # latest_sentence
@@ -998,17 +1294,38 @@ def build_ui() -> gr.Blocks:
             if not current_sentence or current_sentence == "暂无完整句子":
                 # 如果没有句子，返回当前状态
                 latest, all_sents = get_current_sentences()
-                return history, "无紧急风险提示。", {}, session_id, None, latest, all_sents
+                return history, """
+                <div class="risk-alert risk-low">
+                    ✅ 当前状态：无紧急风险提示
+                </div>
+                """, 0.0, session_id, None, latest, all_sents
             
             # 提交句子进行问答
             updated_history, risk_text, progress, updated_session, audio_value = user_step(
                 current_sentence, history, session_id
             )
             
+            # 处理进度显示
+            progress_value = _get_progress_value(progress)
+            
+            # 处理风险提示样式
+            if "高风险" in risk_text:
+                risk_display = f"""
+                <div class="risk-alert risk-high">
+                    ⚠️ {risk_text}
+                </div>
+                """
+            else:
+                risk_display = f"""
+                <div class="risk-alert risk-low">
+                    ✅ {risk_text}
+                </div>
+                """
+            
             # 获取更新后的句子状态
             latest, all_sents = get_current_sentences()
             
-            return updated_history, risk_text, progress, updated_session, audio_value, latest, all_sents
+            return updated_history, risk_display, progress_value, updated_session, audio_value, latest, all_sents
 
         submit_sentence_btn.click(
             fn=submit_current_sentence_sync,
@@ -1016,7 +1333,7 @@ def build_ui() -> gr.Blocks:
             outputs=[
                 chatbot,
                 risk_alert,
-                progress_display,
+                progress_bar,
                 session_state,
                 audio_sys,
                 latest_sentence,
@@ -1031,10 +1348,32 @@ def build_ui() -> gr.Blocks:
         )
 
         # 初始化对话
+        def initialize_with_progress(session_id: str):
+            history, sid, risk_text, progress, audio_value = initialize_conversation(session_id)
+            
+            # 处理进度显示
+            progress_value = _get_progress_value(progress)
+            
+            # 处理风险提示样式
+            if "高风险" in risk_text:
+                risk_display = f"""
+                <div class="risk-alert risk-high">
+                    ⚠️ {risk_text}
+                </div>
+                """
+            else:
+                risk_display = f"""
+                <div class="risk-alert risk-low">
+                    ✅ {risk_text}
+                </div>
+                """
+            
+            return history, sid, risk_display, progress_value, audio_value
+
         demo.load(
-            fn=initialize_conversation,
+            fn=initialize_with_progress,
             inputs=[session_state],
-            outputs=[chatbot, session_state, risk_alert, progress_display, audio_sys],
+            outputs=[chatbot, session_state, risk_alert, progress_bar, audio_sys],
         )
 
         # 添加轮询组件
@@ -1080,7 +1419,7 @@ def build_ui() -> gr.Blocks:
 
 
 if __name__ == "__main__":
-    print("🚀 启动抑郁随访助手应用...")
+    print("🚀 启动智能心境健康评估系统...")
     print(f"📁 项目根目录: {PROJECT_ROOT}")
     print(f"🔑 听悟 AppKey: {settings.TINGWU_APPKEY or settings.ALIBABA_TINGWU_APPKEY or '未配置'}")
     
