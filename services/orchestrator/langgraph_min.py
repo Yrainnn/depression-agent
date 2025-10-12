@@ -486,7 +486,24 @@ class LangGraphMini:
                 user_text=user_text,
             )
 
-        if decision and decision.hamd_partial:
+        if not decision:
+            print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
+            return self._fallback_flow(
+                sid=sid,
+                state=state,
+                item_id=item_id,
+                scoring_segments=scoring_segments,
+                dialogue=dialogue_payload,
+                transcripts=transcripts,
+                user_text=user_text,
+            )
+
+        if state.controller_unusable_turn is not None:
+            state.controller_unusable_turn = None
+            self._persist_state(state)
+
+        if decision.hamd_partial:
+            print("📊 检测到 HAMD 局部评分结果，开始合并...", flush=True)
             partial_payload = decision.hamd_partial.model_dump()
             try:
                 self.repo.merge_scores(sid, partial_payload)
@@ -505,6 +522,10 @@ class LangGraphMini:
             total_payload = partial_payload.get("total_score") or {}
             total_value = self._extract_total_score(total_payload)
             if total_value is not None:
+                print(
+                    f"✅ 当前题号={item_id} 局部评分={total_value}",
+                    flush=True,
+                )
                 state.opinion = self._opinion_from_total(total_value)
 
         if state.scores_acc:
@@ -512,108 +533,57 @@ class LangGraphMini:
         else:
             state.analysis = None
 
-        if not decision:
-            print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
-            state.controller_unusable_turn = state.last_utt_index
-            self._persist_state(state)
-            return self._fallback_flow(
-                sid=sid,
-                state=state,
-                item_id=item_id,
-                scoring_segments=scoring_segments,
-                dialogue=dialogue_payload,
-                transcripts=transcripts,
-                user_text=user_text,
-            )
-
-        if state.controller_unusable_turn is not None:
-            state.controller_unusable_turn = None
-            self._persist_state(state)
-
-        extra: Dict[str, Any] = {}
-        if state.analysis:
-            extra["analysis"] = state.analysis
-
         controller_text = (decision.next_utterance or "").strip()
         if not controller_text:
             extracted_text = self._extract_controller_question(decision_payload)
             controller_text = (extracted_text or "").strip()
 
-        forced_target: Optional[int] = None
-        try:
-            last_clarify = self.repo.get_last_clarify_need(sid)
-        except Exception:  # pragma: no cover - runtime guard
-            LOGGER.exception("Failed to load last clarify target for %s", sid)
-            last_clarify = None
-
         decision_action = (decision.action or "ask").lower()
+        print(
+            f"🎯 控制器动作={decision_action}, 输出={controller_text or 'None'}",
+            flush=True,
+        )
 
-        if (
-            decision_action == "clarify"
-            and last_clarify
-            and (user_text or prepared_segments)
-        ):
-            LOGGER.debug("Clarify override triggered for %s after user response", sid)
-            try:
-                self.repo.clear_last_clarify_need(sid)
-            except Exception:  # pragma: no cover - runtime guard
-                LOGGER.exception("Failed to clear clarify target for %s", sid)
-            forced_target = get_next_item(item_id)
-            if forced_target == -1:
-                decision_action = "finish"
-                controller_text = ""
-            else:
-                decision_action = "ask"
-                controller_text = ""
-
-        if decision_action == "clarify" and state.clarify >= 2:
-            print("⚠️ 澄清次数已达上限，强制进入下一题。", flush=True)
-            decision_action = "ask"
-            controller_text = ""
+        clarify_target_id = decision.current_item_id or item_id
+        clarify_prompt = ""
+        if decision.clarify_target:
+            clarify_target_id = decision.clarify_target.item_id or clarify_target_id
+            clarify_prompt = decision.clarify_target.clarify_need or ""
 
         if decision_action == "clarify":
-            if decision.clarify_target:
-                try:
-                    self.repo.set_last_clarify_need(
-                        sid,
-                        decision.clarify_target.item_id,
-                        decision.clarify_target.clarify_need or "",
-                    )
-                except Exception:  # pragma: no cover - runtime guard
-                    LOGGER.exception("Failed to persist clarify target for %s", sid)
-            target_item_id = (
-                decision.clarify_target.item_id
-                if decision.clarify_target
-                else last_clarify.get("item_id")
-                if isinstance(last_clarify, dict)
-                else item_id
-            )
-            clarify_gap = (
-                decision.clarify_target.clarify_need
-                if decision.clarify_target and decision.clarify_target.clarify_need
-                else last_clarify.get("need")
-                if isinstance(last_clarify, dict)
-                else ""
-            )
-            clarify_text = controller_text or ""
-            if not clarify_text:
-                print("⚠️ DeepSeek 无有效澄清输出，回退固定澄清问。", flush=True)
-                clarify_text = pick_clarify(target_item_id, clarify_gap)
-            if not clarify_text:
-                clarify_text = pick_clarify(item_id, clarify_gap)
-            try:
-                prompt_to_store = (
-                    decision.clarify_target.clarify_need
-                    if decision.clarify_target and decision.clarify_target.clarify_need
-                    else clarify_text
+            if state.clarify >= 2:
+                print("⚠️ 达到最大澄清次数上限，强制推进。", flush=True)
+                decision_action = "ask"
+                controller_text = ""
+            else:
+                state.clarify += 1
+                print(
+                    f"🗣️ DeepSeek 要求继续澄清，第 {state.clarify} 次。",
+                    flush=True,
                 )
+
+        if state.analysis:
+            extra: Dict[str, Any] = {"analysis": state.analysis}
+        else:
+            extra = {}
+
+        if decision_action == "clarify":
+            clarify_text = controller_text
+            if not clarify_text:
+                print("⚠️ DeepSeek 无有效输出，回退固定问题。", flush=True)
+                clarify_text = pick_clarify(clarify_target_id, clarify_prompt)
+            if not clarify_text:
+                clarify_text = pick_clarify(item_id, clarify_prompt)
+            try:
+                prompt_to_store = clarify_prompt or clarify_text
                 if prompt_to_store:
                     self.repo.set_last_clarify_need(
-                        sid, target_item_id or item_id, prompt_to_store
+                        sid,
+                        clarify_target_id or item_id,
+                        prompt_to_store,
                     )
             except Exception:  # pragma: no cover - runtime guard
                 LOGGER.exception("Failed to persist clarify target for %s", sid)
-            state.clarify += 1
             self._append_turn(
                 sid,
                 state,
@@ -621,10 +591,7 @@ class LangGraphMini:
                 turn_type="clarify",
                 text=clarify_text,
             )
-            print(
-                f"🎯 控制器动作=clarify, 输出={clarify_text}",
-                flush=True,
-            )
+            print(f"📢 最终输出问句: {clarify_text}", flush=True)
             return self._make_response(
                 sid,
                 state,
@@ -634,83 +601,40 @@ class LangGraphMini:
                 record=False,
             )
 
+        ask_target = decision.current_item_id or get_next_item(item_id)
+        try:
+            ask_target_int = int(ask_target)
+        except (TypeError, ValueError):
+            ask_target_int = item_id
+        if ask_target_int <= item_id:
+            ask_target_int = get_next_item(item_id)
+
         if decision_action == "ask":
-            target_item = forced_target
-            if target_item in (None, 0):
-                target_item = decision.current_item_id or item_id
-            if target_item in (None, 0):
-                target_item = item_id
-            # 强制与量表顺序对齐：若控制器仍指向当前或更早条目，则推进到下一条
-            try:
-                target_int = int(target_item)
-            except (TypeError, ValueError):
-                target_int = item_id
-            if target_int <= item_id:
-                target_item = get_next_item(item_id)
-            if target_item in (None, -1):
+            if ask_target_int in (None, -1):
                 decision_action = "finish"
-                controller_text = ""
             else:
-                ask_text = controller_text or ""
-                if not ask_text:
-                    print("⚠️ DeepSeek 无有效主问题输出，回退固定题库。", flush=True)
-                    ask_text = pick_primary(target_item)
-                controller_text = ask_text
-                state.clarify = 0
-                target_item = int(target_item)
+                self._advance_to(sid, ask_target_int, state)
+                print(
+                    f"📈 DeepSeek 决策推进至第 {state.index} 题。",
+                    flush=True,
+                )
+                if not controller_text:
+                    print("⚠️ DeepSeek 无有效输出，回退固定问题。", flush=True)
+                    controller_text = pick_primary(state.index)
 
         if decision_action == "ask":
-            # 末条护栏：已在最后一条且没有待澄清，直接完成
-            if item_id == TOTAL_ITEMS:
-                try:
-                    last_clarify = self.repo.get_last_clarify_need(sid)
-                except Exception:  # pragma: no cover
-                    last_clarify = None
-                no_pending_clarify = not last_clarify
-                if no_pending_clarify and (target_item in (None, 0, TOTAL_ITEMS)):
-                    state.completed = True
-                    state.index = TOTAL_ITEMS
-                    self._persist_state(state)
-                    try:
-                        self.repo.mark_finished(sid)
-                    except Exception:  # pragma: no cover - runtime guard
-                        LOGGER.exception("Failed to mark session %s finished", sid)
-                    try:
-                        self.repo.clear_last_clarify_need(sid)
-                    except Exception:  # pragma: no cover - runtime guard
-                        LOGGER.exception("Failed to clear clarify target for %s", sid)
-                    self._append_turn(
-                        sid,
-                        state,
-                        role="assistant",
-                        turn_type="ask",
-                        text=COMPLETION_TEXT,
-                    )
-                    return self._make_response(
-                        sid,
-                        state,
-                        COMPLETION_TEXT,
-                        turn_type="complete",
-                        extra={"analysis": state.analysis} if state.analysis else None,
-                        record=False,
-                    )
-
-            self._advance_to(sid, target_item or item_id, state)
             self._append_turn(
                 sid,
                 state,
                 role="assistant",
                 turn_type="ask",
-                text=controller_text or COMPLETION_TEXT,
+                text=controller_text,
             )
-            print(
-                f"🎯 控制器动作=ask, 输出={controller_text or COMPLETION_TEXT}",
-                flush=True,
-            )
+            print(f"📢 最终输出问句: {controller_text}", flush=True)
             return self._make_response(
                 sid,
                 state,
-                controller_text or COMPLETION_TEXT,
+                controller_text,
                 turn_type="ask",
                 extra=extra,
                 record=False,
@@ -718,6 +642,7 @@ class LangGraphMini:
 
         state.completed = True
         state.index = TOTAL_ITEMS
+        state.clarify = 0
         self._persist_state(state)
         try:
             self.repo.mark_finished(sid)
@@ -728,10 +653,6 @@ class LangGraphMini:
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to clear clarify target for %s", sid)
         completion_text = controller_text or COMPLETION_TEXT
-        print(
-            f"🎯 控制器动作=finish, 输出={completion_text}",
-            flush=True,
-        )
         self._append_turn(
             sid,
             state,
@@ -739,6 +660,7 @@ class LangGraphMini:
             turn_type="ask",
             text=completion_text,
         )
+        print(f"📢 最终输出问句: {completion_text}", flush=True)
         return self._make_response(
             sid,
             state,
