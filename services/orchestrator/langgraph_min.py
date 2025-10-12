@@ -19,6 +19,7 @@ from services.llm.json_client import (
 )
 from services.llm.prompts import (
     get_prompt_hamd17,
+    get_prompt_hamd17_controller,
     get_prompt_diagnosis,
     get_prompt_mdd_judgment,
 )
@@ -319,7 +320,11 @@ class LangGraphMini:
 
         decision: Optional[ControllerDecision] = None
         try:
-            decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
+            decision = self.deepseek.plan_turn(
+                dialogue_payload,
+                current_progress,
+                prompt=get_prompt_hamd17_controller(),
+            )
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
             state.controller_notice_logged = True

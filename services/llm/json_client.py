@@ -268,38 +268,70 @@ class DeepSeekJSONClient:
 
     def plan_turn(
         self,
-        dialogue_json: List[dict],
+        dialogue: List[dict],
         progress: dict,
         *,
-        prompt: Optional[str] = None,
+        prompt: str,
+        stream: bool = False,
     ) -> ControllerDecision:
+        """Invoke DeepSeek controller to plan the next turn."""
+
         if not self.usable():
             raise DeepSeekTemporarilyUnavailableError(
                 "DeepSeek controller planning skipped because the client is temporarily unavailable"
             )
-        prompt_text = prompt or get_prompt_hamd17_controller()
+
+        payload = {
+            "dialogue": dialogue,
+            "progress": progress,
+            "instruction": prompt,
+        }
         messages = [
-            {"role": "system", "content": prompt_text},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "dialogue_json": dialogue_json,
-                        "progress": progress,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
-        content = self._post_chat(
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=2048,
-            temperature=0.2,
-            timeout=self.controller_timeout,
-        )
-        data = json.loads(content)
-        return ControllerDecision.model_validate(data)
+
+        fallback = {
+            "action": "ask",
+            "current_item_id": progress.get("index") or 0,
+            "next_utterance": None,
+            "decision": "ask",
+            "question": None,
+        }
+
+        try:
+            content = self._post_chat(
+                messages=messages,
+                response_format={"type": "json_object"},
+                timeout=self.controller_timeout,
+                stream=stream,
+            )
+            data = json.loads(content) if isinstance(content, str) else content
+            if not isinstance(data, dict):
+                raise ValueError("DeepSeek plan_turn payload must be a JSON object")
+        except Exception as exc:
+            LOGGER.warning(f"[DeepSeek plan_turn] 调用失败: {exc}")
+            return ControllerDecision.model_validate(fallback)
+
+        action = data.get("action") or data.get("decision") or "ask"
+        question = data.get("next_utterance") or data.get("question")
+        data.setdefault("action", action)
+        data.setdefault("decision", action)
+        data.setdefault("next_utterance", question)
+        data.setdefault("question", question)
+
+        clarify_prompt = data.get("clarify_prompt")
+        clarify_target = data.get("clarify_target")
+        if clarify_prompt and not clarify_target:
+            item_id = data.get("clarify_item_id") or progress.get("index") or 0
+            clarify_target = {"item_id": item_id, "clarify_need": clarify_prompt}
+            data["clarify_target"] = clarify_target
+
+        try:
+            return ControllerDecision.model_validate(data)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            LOGGER.warning("DeepSeek plan_turn validation failed: %s", exc)
+            return ControllerDecision.model_validate(fallback)
 
 
 # Convenience singleton -------------------------------------------------
