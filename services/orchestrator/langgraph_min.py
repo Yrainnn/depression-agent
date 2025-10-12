@@ -6,7 +6,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from time import monotonic
+from typing import Any, Dict, Iterable, List, Optional
 
 from packages.common.config import settings
 from services.audio.asr_adapter import AsrError, StubASR, TingwuClientASR
@@ -18,6 +19,7 @@ from services.llm.json_client import (
 )
 from services.llm.prompts import (
     get_prompt_hamd17,
+    get_prompt_hamd17_controller,
     get_prompt_diagnosis,
     get_prompt_mdd_judgment,
 )
@@ -157,13 +159,138 @@ class LangGraphMini:
             return self._complete_payload(state, COMPLETION_TEXT)
 
         item_id = self._current_item_id(state)
-        question = pick_primary(item_id)
+        transcripts = self.repo.get_transcripts(sid) or []
+        dialogue = self._build_dialogue_payload(sid, transcripts)
+        question = self._generate_primary_question(
+            sid, state, item_id, transcripts, dialogue
+        )
         return self._make_response(
             sid,
             state,
             question,
             turn_type="ask",
         )
+
+    @staticmethod
+    def _extract_controller_action(payload: Any) -> Optional[str]:
+        if isinstance(payload, str):
+            return payload or None
+        if isinstance(payload, dict):
+            for key in ("action", "decision", "type"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            # Some controllers may nest the actual action deeper.
+            for key in ("decision", "result", "payload"):
+                nested = payload.get(key)
+                action = LangGraphMini._extract_controller_action(nested)
+                if action:
+                    return action
+        return None
+
+    @staticmethod
+    def _extract_controller_question(payload: Any) -> Optional[str]:
+        def _unwrap(value: Any) -> Optional[str]:
+            if isinstance(value, str):
+                text = value.strip()
+                return text or None
+            if isinstance(value, dict):
+                for key in (
+                    "next_utterance",
+                    "question",
+                    "utterance",
+                    "primary_question",
+                    "text",
+                    "content",
+                    "value",
+                ):
+                    candidate = _unwrap(value.get(key))
+                    if candidate:
+                        return candidate
+                # Allow nested payloads such as {"data": {...}}
+                for key in ("data", "result", "payload"):
+                    candidate = _unwrap(value.get(key))
+                    if candidate:
+                        return candidate
+                return None
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    candidate = _unwrap(item)
+                    if candidate:
+                        return candidate
+            return None
+
+        if isinstance(payload, dict):
+            # First try top-level fields.
+            for key in (
+                "next_utterance",
+                "question",
+                "primary_question",
+                "utterance",
+            ):
+                candidate = _unwrap(payload.get(key))
+                if candidate:
+                    return candidate
+            # Then inspect nested decision metadata.
+            for key in ("decision", "data", "result", "payload"):
+                candidate = _unwrap(payload.get(key))
+                if candidate:
+                    return candidate
+        return _unwrap(payload)
+
+    def _coerce_controller_decision(
+        self, raw: Any, progress: Optional[Dict[str, Any]] = None
+    ) -> Optional[ControllerDecision]:
+        if raw is None:
+            return None
+        if isinstance(raw, ControllerDecision):
+            return raw
+        if not isinstance(raw, dict):
+            LOGGER.debug("Unexpected controller payload type: %s", type(raw))
+            return None
+
+        data = dict(raw)
+        decision_block = data.get("decision")
+        action = self._extract_controller_action(data)
+        if not action and isinstance(decision_block, dict):
+            action = self._extract_controller_action(decision_block)
+        if not action:
+            action = "ask"
+
+        question = self._extract_controller_question(data)
+        if not question and isinstance(decision_block, dict):
+            question = self._extract_controller_question(decision_block)
+
+        data.setdefault("action", action)
+        data.setdefault("decision", action)
+        if question:
+            data.setdefault("next_utterance", question)
+            data.setdefault("question", question)
+        elif "next_utterance" not in data:
+            data["next_utterance"] = ""
+        if "question" not in data:
+            data["question"] = data.get("next_utterance")
+
+        if "current_item_id" not in data and progress is not None:
+            item_id = (
+                (progress.get("index") if isinstance(progress, dict) else None) or 0
+            )
+            data["current_item_id"] = item_id
+
+        clarify_prompt = data.get("clarify_prompt")
+        if clarify_prompt and not data.get("clarify_target"):
+            item_id = (
+                data.get("clarify_item_id")
+                or (progress.get("index") if progress else None)
+                or 0
+            )
+            data["clarify_target"] = {"item_id": item_id, "clarify_need": clarify_prompt}
+
+        try:
+            return ControllerDecision.model_validate(data)
+        except Exception as exc:
+            LOGGER.debug("Failed to normalise controller decision: %s", exc)
+            return None
 
     def step(
         self,
@@ -180,10 +307,20 @@ class LangGraphMini:
             return self._complete_payload(state, COMPLETION_TEXT)
 
         asked_primary = self._has_asked_any_primary(sid)
+        item_id = self._current_item_id(state)
+        print(f"🧠 进入 step(), 当前题号={item_id}", flush=True)
 
         if not text and not audio_ref:
             # 沿用当前条目，不要重置回首问
-            question = pick_primary(self._current_item_id(state))
+            transcripts = self.repo.get_transcripts(sid) or []
+            dialogue = self._build_dialogue_payload(sid, transcripts)
+            question = self._generate_primary_question(
+                sid,
+                state,
+                item_id,
+                transcripts,
+                dialogue,
+            )
             response = self._make_response(
                 sid,
                 state,
@@ -216,7 +353,7 @@ class LangGraphMini:
             self.repo.append_transcript(sid, segment)
             LOGGER.debug("Appended transcript for %s: %s", sid, segment)
 
-        transcripts = self.repo.get_transcripts(sid)
+        transcripts = self.repo.get_transcripts(sid) or []
 
         hold_payload = self._handle_risk_hold(sid, state, prepared_segments)
         if hold_payload is not None:
@@ -234,8 +371,16 @@ class LangGraphMini:
         if report_payload is not None:
             return report_payload
 
+        dialogue_payload = self._build_dialogue_payload(sid, transcripts)
+
         if not asked_primary:
-            question = pick_primary(self._current_item_id(state))
+            question = self._generate_primary_question(
+                sid,
+                state,
+                self._current_item_id(state),
+                transcripts,
+                dialogue_payload,
+            )
             return self._make_response(
                 sid,
                 state,
@@ -247,8 +392,6 @@ class LangGraphMini:
         scoring_segments = self._latest_segments(
             transcripts, self.window_n, self.window_seconds
         )
-
-        dialogue_payload = self._build_dialogue_payload(sid)
         current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
         controller_enabled = (
@@ -300,7 +443,17 @@ class LangGraphMini:
 
         decision: Optional[ControllerDecision] = None
         try:
-            decision = self.deepseek.plan_turn(dialogue_payload, current_progress)
+            print(
+                f"🧩 调用 DeepSeek 控制器生成第{item_id}题或澄清问",
+                flush=True,
+            )
+            decision_payload = self.deepseek.plan_turn(
+                dialogue_payload,
+                current_progress,
+                prompt=get_prompt_hamd17_controller(),
+            )
+            print(f"🤖 DeepSeek 返回: {decision_payload}", flush=True)
+            decision = self._coerce_controller_decision(decision_payload, current_progress)
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
             state.controller_notice_logged = True
@@ -360,6 +513,7 @@ class LangGraphMini:
             state.analysis = None
 
         if not decision:
+            print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
             state.controller_unusable_turn = state.last_utt_index
             self._persist_state(state)
             return self._fallback_flow(
@@ -380,7 +534,11 @@ class LangGraphMini:
         if state.analysis:
             extra["analysis"] = state.analysis
 
-        next_utt = decision.next_utterance or "请继续描述。"
+        controller_text = (decision.next_utterance or "").strip()
+        if not controller_text:
+            extracted_text = self._extract_controller_question(decision_payload)
+            controller_text = (extracted_text or "").strip()
+
         forced_target: Optional[int] = None
         try:
             last_clarify = self.repo.get_last_clarify_need(sid)
@@ -388,10 +546,10 @@ class LangGraphMini:
             LOGGER.exception("Failed to load last clarify target for %s", sid)
             last_clarify = None
 
-        decision_action = decision.action
+        decision_action = (decision.action or "ask").lower()
 
         if (
-            decision.action == "clarify"
+            decision_action == "clarify"
             and last_clarify
             and (user_text or prepared_segments)
         ):
@@ -403,9 +561,15 @@ class LangGraphMini:
             forced_target = get_next_item(item_id)
             if forced_target == -1:
                 decision_action = "finish"
-                next_utt = COMPLETION_TEXT
+                controller_text = ""
             else:
                 decision_action = "ask"
+                controller_text = ""
+
+        if decision_action == "clarify" and state.clarify >= 2:
+            print("⚠️ 澄清次数已达上限，强制进入下一题。", flush=True)
+            decision_action = "ask"
+            controller_text = ""
 
         if decision_action == "clarify":
             if decision.clarify_target:
@@ -431,19 +595,40 @@ class LangGraphMini:
                 if isinstance(last_clarify, dict)
                 else ""
             )
-            next_utt = pick_clarify(target_item_id, clarify_gap)
+            clarify_text = controller_text or ""
+            if not clarify_text:
+                print("⚠️ DeepSeek 无有效澄清输出，回退固定澄清问。", flush=True)
+                clarify_text = pick_clarify(target_item_id, clarify_gap)
+            if not clarify_text:
+                clarify_text = pick_clarify(item_id, clarify_gap)
+            try:
+                prompt_to_store = (
+                    decision.clarify_target.clarify_need
+                    if decision.clarify_target and decision.clarify_target.clarify_need
+                    else clarify_text
+                )
+                if prompt_to_store:
+                    self.repo.set_last_clarify_need(
+                        sid, target_item_id or item_id, prompt_to_store
+                    )
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to persist clarify target for %s", sid)
             state.clarify += 1
             self._append_turn(
                 sid,
                 state,
                 role="assistant",
                 turn_type="clarify",
-                text=next_utt,
+                text=clarify_text,
+            )
+            print(
+                f"🎯 控制器动作=clarify, 输出={clarify_text}",
+                flush=True,
             )
             return self._make_response(
                 sid,
                 state,
-                next_utt,
+                clarify_text,
                 turn_type="clarify",
                 extra=extra,
                 record=False,
@@ -464,9 +649,15 @@ class LangGraphMini:
                 target_item = get_next_item(item_id)
             if target_item in (None, -1):
                 decision_action = "finish"
-                next_utt = COMPLETION_TEXT
+                controller_text = ""
             else:
-                next_utt = pick_primary(target_item)
+                ask_text = controller_text or ""
+                if not ask_text:
+                    print("⚠️ DeepSeek 无有效主问题输出，回退固定题库。", flush=True)
+                    ask_text = pick_primary(target_item)
+                controller_text = ask_text
+                state.clarify = 0
+                target_item = int(target_item)
 
         if decision_action == "ask":
             # 末条护栏：已在最后一条且没有待澄清，直接完成
@@ -510,12 +701,16 @@ class LangGraphMini:
                 state,
                 role="assistant",
                 turn_type="ask",
-                text=next_utt,
+                text=controller_text or COMPLETION_TEXT,
+            )
+            print(
+                f"🎯 控制器动作=ask, 输出={controller_text or COMPLETION_TEXT}",
+                flush=True,
             )
             return self._make_response(
                 sid,
                 state,
-                next_utt,
+                controller_text or COMPLETION_TEXT,
                 turn_type="ask",
                 extra=extra,
                 record=False,
@@ -532,7 +727,11 @@ class LangGraphMini:
             self.repo.clear_last_clarify_need(sid)
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to clear clarify target for %s", sid)
-        completion_text = next_utt or COMPLETION_TEXT
+        completion_text = controller_text or COMPLETION_TEXT
+        print(
+            f"🎯 控制器动作=finish, 输出={completion_text}",
+            flush=True,
+        )
         self._append_turn(
             sid,
             state,
@@ -591,6 +790,69 @@ class LangGraphMini:
                     continue
                 payload[key] = value
         return payload
+
+    def _generate_primary_question(
+        self,
+        sid: str,
+        state: SessionState,
+        item_id: int,
+        transcripts: Optional[List[Dict[str, Any]]],
+        dialogue: List[Dict[str, Any]],
+    ) -> str:
+        fallback = pick_primary(item_id)
+
+        if not settings.ENABLE_DS_CONTROLLER or not self.deepseek.usable():
+            return fallback
+
+        print(f"🧠 调用 DeepSeek 控制器生成第{item_id}题", flush=True)
+        print(
+            f"ENABLE_DS_CONTROLLER={getattr(settings, 'ENABLE_DS_CONTROLLER', None)}",
+            flush=True,
+        )
+        print(f"DeepSeek usable={self.deepseek.usable()}", flush=True)
+
+        progress = {"index": item_id, "total": TOTAL_ITEMS}
+        try:
+            decision_payload = self.deepseek.plan_turn(
+                dialogue,
+                progress,
+                prompt=get_prompt_hamd17_controller(),
+            )
+            decision = self._coerce_controller_decision(decision_payload, progress)
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek question generation unavailable for %s: %s", sid, exc)
+            state.controller_notice_logged = True
+            self._persist_state(state)
+            return fallback
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.info("DeepSeek question generation failed for %s: %s", sid, exc)
+            print(f"❌ DeepSeek question generation error: {exc}", flush=True)
+            state.controller_notice_logged = True
+            self._persist_state(state)
+            return fallback
+
+        if decision and decision.next_utterance:
+            question = (decision.next_utterance or "").strip()
+            if question:
+                return question
+
+        fallback_from_payload = self._extract_controller_question(decision_payload)
+        if fallback_from_payload:
+            stripped = fallback_from_payload.strip()
+            if stripped:
+                LOGGER.debug(
+                    "Using controller payload question fallback for %s (item %s)",
+                    sid,
+                    item_id,
+                )
+                return stripped
+
+        LOGGER.debug(
+            "DeepSeek question generation returned no utterance for %s (item %s)",
+            sid,
+            item_id,
+        )
+        return fallback
 
     def _maybe_handle_report_request(
         self, sid: str, state: SessionState, user_text: Optional[str]
@@ -1197,11 +1459,22 @@ class LangGraphMini:
         transcripts: List[Dict[str, Any]],
         user_text: Optional[str],
     ) -> Dict[str, Any]:
-        analysis_result = self._run_deepseek_analysis(dialogue)
+        analysis_result = self._run_ds_analysis_stream(dialogue)
         extra_payload: Dict[str, Any] = {}
+        clarify_prompt: Optional[str] = None
+        clarify_item_id: Optional[int] = None
 
         if analysis_result:
             self._store_analysis_scores(sid, state, analysis_result)
+            target_item = next(
+                (item for item in analysis_result.items if item.item_id == item_id),
+                None,
+            )
+            if target_item and target_item.clarify_need:
+                clarify_item_id = target_item.item_id
+                clarify_prompt = target_item.clarify_prompt or pick_clarify(
+                    target_item.item_id, ""
+                )
         else:
             score_result = self._score_current_item(state, scoring_segments, dialogue)
             if score_result:
@@ -1209,19 +1482,9 @@ class LangGraphMini:
                 state.opinion = score_result.get("opinion") or state.opinion
                 state.analysis = self._analysis_from_scores(state)
 
-        if state.analysis is not None:
-            extra_payload["analysis"] = copy.deepcopy(state.analysis)
-        else:
-            extra_payload["analysis"] = None
-
-        active_clarify_need: Optional[str] = None
-        if analysis_result:
-            target_item = next(
-                (item for item in analysis_result.items if item.item_id == item_id),
-                None,
-            )
-            if target_item:
-                active_clarify_need = target_item.clarify_need or None
+        extra_payload["analysis"] = (
+            copy.deepcopy(state.analysis) if state.analysis is not None else None
+        )
 
         try:
             last_clarify = self.repo.get_last_clarify_need(sid)
@@ -1229,35 +1492,25 @@ class LangGraphMini:
             LOGGER.exception("Failed to read last clarify target for %s", sid)
             last_clarify = None
 
-        if last_clarify and last_clarify.get("item_id") == item_id:
-            stored_need = last_clarify.get("need")
-            if not active_clarify_need or stored_need != active_clarify_need:
-                try:
-                    self.repo.clear_last_clarify_need(sid)
-                except Exception:  # pragma: no cover - runtime guard
-                    LOGGER.exception("Failed to clear clarify target for %s", sid)
+        if not clarify_prompt and last_clarify and last_clarify.get("item_id") == item_id:
+            try:
+                self.repo.clear_last_clarify_need(sid)
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to clear clarify target for %s", sid)
 
-        clarify_payload: Optional[Tuple[str, int, str]] = None
-        if analysis_result and user_text and state.clarify < 2:
-            clarify_payload = self._clarify_from_analysis(
-                state, analysis_result, dialogue
-            )
-
-        if clarify_payload:
-            clarify_question, clarify_item_id, clarify_need = clarify_payload
-            if clarify_need:
-                try:
-                    self.repo.set_last_clarify_need(
-                        sid, clarify_item_id, clarify_need
-                    )
-                except Exception:  # pragma: no cover - runtime guard
-                    LOGGER.exception("Failed to persist clarify target for %s", sid)
+        if clarify_prompt and state.clarify < 2:
+            try:
+                self.repo.set_last_clarify_need(
+                    sid, clarify_item_id or item_id, clarify_prompt
+                )
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to persist clarify target for %s", sid)
             state.clarify += 1
             self._persist_state(state)
             return self._make_response(
                 sid,
                 state,
-                clarify_question,
+                clarify_prompt,
                 turn_type="clarify",
                 extra=extra_payload,
             )
@@ -1267,7 +1520,9 @@ class LangGraphMini:
         next_item = get_next_item(item_id)
         if next_item != -1:
             self._advance_to(sid, next_item, state)
-            next_question = pick_primary(next_item)
+            next_question = self._generate_primary_question(
+                sid, state, next_item, transcripts, dialogue
+            )
             return self._make_response(
                 sid,
                 state,
@@ -1420,9 +1675,36 @@ class LangGraphMini:
             return "出现一定情绪波动，可继续观察并保持健康习惯。"
         return "当前情绪评分较低，如有需要仍可与专业人士交流。"
 
-    def _build_dialogue_payload(self, sid: str) -> List[Dict[str, Any]]:
+    def _build_dialogue_payload(
+        self,
+        sid: str,
+        transcripts: Optional[List[Dict[str, Any]]] = None,
+        *,
+        window_turns: int = 3,
+    ) -> List[Dict[str, Any]]:
+        source = transcripts
+        if source is None:
+            source = self.repo.get_transcripts(sid) or []
+
+        trimmed: List[Dict[str, Any]] = []
+        assistant_turns = 0
+        user_turns = 0
+        for segment in reversed(source):
+            role = segment.get("role")
+            if not role:
+                role = "assistant" if segment.get("speaker") != "patient" else "user"
+            if role == "assistant":
+                assistant_turns += 1
+            elif role == "user":
+                user_turns += 1
+            trimmed.append(segment)
+            if assistant_turns >= window_turns and user_turns >= window_turns:
+                break
+
+        trimmed.reverse()
+
         dialogue: List[Dict[str, Any]] = []
-        for segment in self.repo.get_transcripts(sid):
+        for segment in trimmed:
             role = segment.get("role")
             if not role:
                 role = "assistant" if segment.get("speaker") != "patient" else "user"
@@ -1430,7 +1712,8 @@ class LangGraphMini:
                 "sid": sid,
                 "utt_id": segment.get("utt_id"),
                 "role": role,
-                "type": segment.get("type") or ("ask" if role == "assistant" else "answer"),
+                "type": segment.get("type")
+                or ("ask" if role == "assistant" else "answer"),
                 "text": segment.get("text", ""),
                 "ts": segment.get("ts") or [0, 0],
                 "sentiment": segment.get("sentiment", "中性"),
@@ -1438,19 +1721,30 @@ class LangGraphMini:
             dialogue.append(entry)
         return dialogue
 
-    def _run_deepseek_analysis(self, dialogue: List[Dict[str, Any]]) -> Optional[HAMDResult]:
-        if not dialogue:
+    def _run_ds_analysis_stream(
+        self, dialogue: List[Dict[str, Any]]
+    ) -> Optional[HAMDResult]:
+        if not dialogue or not self.deepseek.usable():
             return None
-        if not self.deepseek.usable():
-            return None
+        started = monotonic()
         try:
-            return self.deepseek.analyze(dialogue, get_prompt_hamd17())
+            result = self.deepseek.analyze(
+                dialogue,
+                get_prompt_hamd17(),
+                stream=True,
+            )
+            elapsed = monotonic() - started
+            LOGGER.debug("DeepSeek analysis stream completed in %.2fs", elapsed)
+            return result
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek analysis temporarily unavailable: %s", exc)
             return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analysis skipped: %s", exc)
             return None
+        finally:
+            if 'elapsed' not in locals():
+                LOGGER.debug("DeepSeek analysis stream aborted after %.2fs", monotonic() - started)
 
     def _store_analysis_scores(
         self, sid: str, state: SessionState, result: HAMDResult
@@ -1467,7 +1761,7 @@ class LangGraphMini:
                     "score_reason": item.score_reason,
                     "dialogue_evidence": getattr(item, "dialogue_evidence", None),
                     "symptom_summary": getattr(item, "symptom_summary", None),
-                    "clarify_need": item.clarify_need,
+                    "clarify_need": item.clarify_prompt if item.clarify_need else None,
                 }
             )
             if normalized:
@@ -1496,30 +1790,5 @@ class LangGraphMini:
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to persist DeepSeek result for %s", sid)
         self._persist_state(state)
-
-    def _clarify_from_analysis(
-        self,
-        state: SessionState,
-        result: HAMDResult,
-        dialogue: List[Dict[str, Any]],
-    ) -> Optional[Tuple[str, int, str]]:
-        current_item = self._current_item_id(state)
-        target = next(
-            (
-                item
-                for item in result.items
-                if item.item_id == current_item and item.score_type == "类型4" and item.clarify_need
-            ),
-            None,
-        )
-        if target is None:
-            return None
-        clarify_need = target.clarify_need or ""
-        evidence_text = "；".join(
-            [entry.get("text", "") for entry in dialogue if entry.get("role") == "user"][-2:]
-        )
-        question = pick_clarify(target.item_id, clarify_need)
-        return question, target.item_id, clarify_need
-
 
 orchestrator = LangGraphMini()
