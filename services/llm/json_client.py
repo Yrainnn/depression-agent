@@ -273,13 +273,18 @@ class DeepSeekJSONClient:
         *,
         prompt: str,
         stream: bool = False,
-    ) -> ControllerDecision:
+    ) -> dict:
         """Invoke DeepSeek controller to plan the next turn."""
 
         if not self.usable():
             raise DeepSeekTemporarilyUnavailableError(
                 "DeepSeek controller planning skipped because the client is temporarily unavailable"
             )
+
+        import time
+
+        start = time.time()
+        print("🔥 DeepSeek plan_turn 已执行", flush=True)
 
         payload = {
             "dialogue": dialogue,
@@ -291,13 +296,8 @@ class DeepSeekJSONClient:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
 
-        fallback = {
-            "action": "ask",
-            "current_item_id": progress.get("index") or 0,
-            "next_utterance": None,
-            "decision": "ask",
-            "question": None,
-        }
+        fallback: dict = {"decision": "ask", "question": None}
+        content: Optional[Any] = None
 
         try:
             content = self._post_chat(
@@ -306,32 +306,24 @@ class DeepSeekJSONClient:
                 timeout=self.controller_timeout,
                 stream=stream,
             )
+            elapsed = time.time() - start
+            print(f"⏱️ DeepSeek 调用耗时 {elapsed:.2f} 秒", flush=True)
             data = json.loads(content) if isinstance(content, str) else content
             if not isinstance(data, dict):
                 raise ValueError("DeepSeek plan_turn payload must be a JSON object")
+            LOGGER.info(
+                "[DeepSeek plan_turn] 调用成功 - action=%s question=%s",
+                data.get("decision") or data.get("action"),
+                data.get("question") or data.get("next_utterance"),
+            )
+            return data
+        except json.JSONDecodeError:
+            print(f"⚠️ DeepSeek 返回非 JSON 内容：{content}", flush=True)
+            return fallback
         except Exception as exc:
+            print(f"❌ DeepSeek 调用失败: {exc}", flush=True)
             LOGGER.warning(f"[DeepSeek plan_turn] 调用失败: {exc}")
-            return ControllerDecision.model_validate(fallback)
-
-        action = data.get("action") or data.get("decision") or "ask"
-        question = data.get("next_utterance") or data.get("question")
-        data.setdefault("action", action)
-        data.setdefault("decision", action)
-        data.setdefault("next_utterance", question)
-        data.setdefault("question", question)
-
-        clarify_prompt = data.get("clarify_prompt")
-        clarify_target = data.get("clarify_target")
-        if clarify_prompt and not clarify_target:
-            item_id = data.get("clarify_item_id") or progress.get("index") or 0
-            clarify_target = {"item_id": item_id, "clarify_need": clarify_prompt}
-            data["clarify_target"] = clarify_target
-
-        try:
-            return ControllerDecision.model_validate(data)
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            LOGGER.warning("DeepSeek plan_turn validation failed: %s", exc)
-            return ControllerDecision.model_validate(fallback)
+            return fallback
 
 
 # Convenience singleton -------------------------------------------------

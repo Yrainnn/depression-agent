@@ -171,6 +171,42 @@ class LangGraphMini:
             turn_type="ask",
         )
 
+    def _coerce_controller_decision(
+        self, raw: Any, progress: Optional[Dict[str, Any]] = None
+    ) -> Optional[ControllerDecision]:
+        if raw is None:
+            return None
+        if isinstance(raw, ControllerDecision):
+            return raw
+        if not isinstance(raw, dict):
+            LOGGER.debug("Unexpected controller payload type: %s", type(raw))
+            return None
+
+        data = dict(raw)
+        action = data.get("action") or data.get("decision") or "ask"
+        question = data.get("next_utterance") or data.get("question")
+        data.setdefault("action", action)
+        data.setdefault("decision", action)
+        data.setdefault("next_utterance", question)
+        data.setdefault("question", question)
+        if "current_item_id" not in data and progress is not None:
+            data["current_item_id"] = progress.get("index") or 0
+
+        clarify_prompt = data.get("clarify_prompt")
+        if clarify_prompt and not data.get("clarify_target"):
+            item_id = (
+                data.get("clarify_item_id")
+                or (progress.get("index") if progress else None)
+                or 0
+            )
+            data["clarify_target"] = {"item_id": item_id, "clarify_need": clarify_prompt}
+
+        try:
+            return ControllerDecision.model_validate(data)
+        except Exception as exc:
+            LOGGER.debug("Failed to normalise controller decision: %s", exc)
+            return None
+
     def step(
         self,
         sid: str,
@@ -320,11 +356,12 @@ class LangGraphMini:
 
         decision: Optional[ControllerDecision] = None
         try:
-            decision = self.deepseek.plan_turn(
+            decision_payload = self.deepseek.plan_turn(
                 dialogue_payload,
                 current_progress,
                 prompt=get_prompt_hamd17_controller(),
             )
+            decision = self._coerce_controller_decision(decision_payload, current_progress)
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
             state.controller_notice_logged = True
@@ -629,13 +666,21 @@ class LangGraphMini:
         if not settings.ENABLE_DS_CONTROLLER or not self.deepseek.usable():
             return fallback
 
+        print(f"🧠 调用 DeepSeek 控制器生成第{item_id}题", flush=True)
+        print(
+            f"ENABLE_DS_CONTROLLER={getattr(settings, 'ENABLE_DS_CONTROLLER', None)}",
+            flush=True,
+        )
+        print(f"DeepSeek usable={self.deepseek.usable()}", flush=True)
+
         progress = {"index": item_id, "total": TOTAL_ITEMS}
         try:
-            decision = self.deepseek.plan_turn(
+            decision_payload = self.deepseek.plan_turn(
                 dialogue,
                 progress,
-                prompt=get_prompt_hamd17(),
+                prompt=get_prompt_hamd17_controller(),
             )
+            decision = self._coerce_controller_decision(decision_payload, progress)
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek question generation unavailable for %s: %s", sid, exc)
             state.controller_notice_logged = True
@@ -643,6 +688,7 @@ class LangGraphMini:
             return fallback
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.info("DeepSeek question generation failed for %s: %s", sid, exc)
+            print(f"❌ DeepSeek question generation error: {exc}", flush=True)
             state.controller_notice_logged = True
             self._persist_state(state)
             return fallback
