@@ -24,6 +24,8 @@ from services.llm.prompts import (
 
 LOGGER = logging.getLogger(__name__)
 
+TOTAL_ITEMS = 17
+
 
 class DeepSeekTemporarilyUnavailableError(RuntimeError):
     """Raised when the DeepSeek client is temporarily unavailable."""
@@ -342,6 +344,38 @@ class DeepSeekJSONClient:
             return fallback
 
 
+# ---------------------------------------------------------------------------
+def analyze_json(state: Any) -> Dict[str, Any]:
+    """Helper used by the simplified orchestrator wrapper."""
+
+    dialogue = getattr(state, "dialogue", [])
+    if not isinstance(dialogue, list):
+        dialogue = []
+    progress: Dict[str, Any] = {
+        "index": getattr(state, "index", 1),
+        "clarify_count": getattr(state, "clarify_count", 0),
+        "total": TOTAL_ITEMS,
+    }
+
+    client_instance = getattr(state, "deepseek_client", None)
+    if isinstance(client_instance, DeepSeekJSONClient):
+        controller = client_instance
+    else:
+        controller = client
+
+    prompt = get_prompt_hamd17_controller()
+    try:
+        return controller.plan_turn(
+            dialogue=dialogue,
+            progress=progress,
+            prompt=prompt,
+            stream=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOGGER.warning("[DeepSeek analyze_json] 调用失败: %s", exc)
+        return {}
+
+
 # Convenience singleton -------------------------------------------------
 client = DeepSeekJSONClient()
 
@@ -356,4 +390,5 @@ __all__ = [
     "get_prompt_diagnosis",
     "get_prompt_mdd_judgment",
     "get_prompt_clarify_cn",
+    "analyze_json",
 ]
