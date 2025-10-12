@@ -453,7 +453,67 @@ class LangGraphMini:
                 prompt=get_prompt_hamd17_controller(),
             )
             print(f"🤖 DeepSeek 返回: {decision_payload}", flush=True)
-            decision = self._coerce_controller_decision(decision_payload, current_progress)
+
+            # 🧠 统一字段兼容读取
+            if isinstance(decision_payload, dict):
+                decision_action = (
+                    decision_payload.get("action")
+                    or decision_payload.get("decision")
+                    or decision_payload.get("type")
+                )
+                ask_text = (
+                    decision_payload.get("next_utterance")
+                    or decision_payload.get("question")
+                )
+            else:
+                decision_action = None
+                ask_text = None
+
+            # 🩺 决策有效性检查
+            if not decision_payload or not isinstance(decision_payload, dict):
+                print("⚠️ DeepSeek 返回对象无效，启用 fallback。", flush=True)
+                return self._fallback_flow(
+                    sid=sid,
+                    state=state,
+                    item_id=item_id,
+                    scoring_segments=scoring_segments,
+                    dialogue=dialogue_payload,
+                    transcripts=transcripts,
+                    user_text=user_text,
+                )
+
+            normalized_payload = dict(decision_payload)
+
+            if decision_action and ask_text:
+                print(
+                    f"✅ DeepSeek 主问有效，action={decision_action}, 问句={ask_text}",
+                    flush=True,
+                )
+            elif decision_action == "ask" and not ask_text:
+                print(
+                    "⚠️ DeepSeek 决策有效但无输出，回退固定题库。",
+                    flush=True,
+                )
+                ask_text = pick_primary(item_id)
+            elif not decision_action:
+                print(
+                    "⚠️ DeepSeek 未返回有效动作字段，默认使用 ask。",
+                    flush=True,
+                )
+                decision_action = "ask"
+
+            if ask_text is None:
+                ask_text = ""
+
+            normalized_payload.setdefault("action", decision_action)
+            normalized_payload.setdefault("decision", decision_action)
+            normalized_payload.setdefault("next_utterance", ask_text)
+            normalized_payload.setdefault("question", ask_text)
+
+            decision = self._coerce_controller_decision(
+                normalized_payload, current_progress
+            )
+            decision_payload = normalized_payload
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
             state.controller_notice_logged = True
