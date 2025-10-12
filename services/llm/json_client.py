@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from time import monotonic
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -37,7 +38,7 @@ class HAMDItem(BaseModel):
     score: int
     score_type: Optional[str] = None
     score_reason: Optional[str] = None
-    clarify_need: bool = False
+    clarify_need: Optional[Union[str, bool]] = None
     clarify_prompt: Optional[str] = None
 
 
@@ -308,7 +309,25 @@ class DeepSeekJSONClient:
             )
             elapsed = time.time() - start
             print(f"⏱️ DeepSeek 调用耗时 {elapsed:.2f} 秒", flush=True)
-            data = json.loads(content) if isinstance(content, str) else content
+            data: Optional[Any]
+            if isinstance(content, str):
+                try:
+                    cleaned = re.search(r"\{.*\}", content, re.S)
+                    if cleaned:
+                        data = json.loads(cleaned.group(0))
+                    else:
+                        raise ValueError("No JSON object found in response text.")
+                except Exception as decode_exc:
+                    print(
+                        f"⚠️ DeepSeek plan_turn JSON decode error: {decode_exc}",
+                        flush=True,
+                    )
+                    LOGGER.warning(
+                        "DeepSeek plan_turn decode failure: %s", decode_exc
+                    )
+                    return fallback
+            else:
+                data = content
             if not isinstance(data, dict):
                 raise ValueError("DeepSeek plan_turn payload must be a JSON object")
             LOGGER.info(
@@ -317,9 +336,6 @@ class DeepSeekJSONClient:
                 data.get("question") or data.get("next_utterance"),
             )
             return data
-        except json.JSONDecodeError:
-            print(f"⚠️ DeepSeek 返回非 JSON 内容：{content}", flush=True)
-            return fallback
         except Exception as exc:
             print(f"❌ DeepSeek 调用失败: {exc}", flush=True)
             LOGGER.warning(f"[DeepSeek plan_turn] 调用失败: {exc}")

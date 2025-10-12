@@ -469,41 +469,45 @@ class LangGraphMini:
                 decision_action = None
                 ask_text = None
 
-            # 🩺 决策有效性检查
+            valid_decision = False
             if not decision_payload or not isinstance(decision_payload, dict):
                 print("⚠️ DeepSeek 返回对象无效，启用 fallback。", flush=True)
-                return self._fallback_flow(
-                    sid=sid,
-                    state=state,
-                    item_id=item_id,
-                    scoring_segments=scoring_segments,
-                    dialogue=dialogue_payload,
-                    transcripts=transcripts,
-                    user_text=user_text,
-                )
-
-            normalized_payload = dict(decision_payload)
-
-            if decision_action and ask_text:
-                print(
-                    f"✅ DeepSeek 主问有效，action={decision_action}, 问句={ask_text}",
-                    flush=True,
-                )
-            elif decision_action == "ask" and not ask_text:
-                print(
-                    "⚠️ DeepSeek 决策有效但无输出，回退固定题库。",
-                    flush=True,
-                )
                 ask_text = pick_primary(item_id)
-            elif not decision_action:
-                print(
-                    "⚠️ DeepSeek 未返回有效动作字段，默认使用 ask。",
-                    flush=True,
-                )
                 decision_action = "ask"
+            else:
+                if decision_action and ask_text:
+                    print(
+                        f"✅ DeepSeek 主问有效，action={decision_action}, 问句={ask_text}",
+                        flush=True,
+                    )
+                    valid_decision = True
+                elif decision_action == "ask" and not ask_text:
+                    print(
+                        "⚠️ DeepSeek 决策有效但无输出，回退固定题库。",
+                        flush=True,
+                    )
+                    ask_text = pick_primary(item_id)
+                    valid_decision = True
+                elif not decision_action:
+                    print(
+                        "⚠️ DeepSeek 未返回有效动作字段，默认使用 ask。",
+                        flush=True,
+                    )
+                    decision_action = "ask"
+                    valid_decision = True
+                else:
+                    print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
+                    ask_text = pick_primary(item_id)
+                    decision_action = "ask"
+
+            state.valid_ds = bool(valid_decision)
 
             if ask_text is None:
                 ask_text = ""
+
+            normalized_payload = (
+                dict(decision_payload) if isinstance(decision_payload, dict) else {}
+            )
 
             normalized_payload.setdefault("action", decision_action)
             normalized_payload.setdefault("decision", decision_action)
@@ -547,7 +551,10 @@ class LangGraphMini:
             )
 
         if not decision:
-            print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
+            if getattr(state, "valid_ds", False):
+                print("🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。", flush=True)
+            else:
+                print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
             return self._fallback_flow(
                 sid=sid,
                 state=state,
@@ -645,11 +652,18 @@ class LangGraphMini:
                             decision_payload = followup_payload
                             if followup_decision:
                                 decision = followup_decision
+                            state.valid_ds = True
                         else:
-                            print(
-                                "⚠️ DeepSeek 无输出，回退固定问题。",
-                                flush=True,
-                            )
+                            if getattr(state, "valid_ds", False):
+                                print(
+                                    "🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。",
+                                    flush=True,
+                                )
+                            else:
+                                print(
+                                    "⚠️ 触发 fallback（DeepSeek 输出无效）。",
+                                    flush=True,
+                                )
                             controller_text = pick_primary(state.index)
                     except Exception as exc:  # pragma: no cover - runtime guard
                         print(
@@ -673,7 +687,13 @@ class LangGraphMini:
         if decision_action == "clarify":
             clarify_text = controller_text
             if not clarify_text:
-                print("⚠️ DeepSeek 无有效输出，回退固定问题。", flush=True)
+                if getattr(state, "valid_ds", False):
+                    print(
+                        "🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。",
+                        flush=True,
+                    )
+                else:
+                    print("⚠️ 触发 fallback（DeepSeek 输出无效）。", flush=True)
                 clarify_text = pick_clarify(clarify_target_id, clarify_prompt)
             if not clarify_text:
                 clarify_text = pick_clarify(item_id, clarify_prompt)
@@ -736,7 +756,16 @@ class LangGraphMini:
                     flush=True,
                 )
                 if not controller_text:
-                    print("⚠️ DeepSeek 无有效输出，回退固定问题。", flush=True)
+                    if getattr(state, "valid_ds", False):
+                        print(
+                            "🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "⚠️ 触发 fallback（DeepSeek 输出无效）。",
+                            flush=True,
+                        )
                     controller_text = pick_primary(state.index)
 
         if decision_action == "ask":
