@@ -210,6 +210,48 @@ def test_generate_primary_question_fallback_to_question_bank() -> None:
     assert question == pick_primary(1)
 
 
+def test_generate_primary_question_prefers_controller_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ControllerDeepSeek:
+        def usable(self) -> bool:
+            return True
+
+        def plan_turn(self, *_: Any, **__: Any) -> Dict[str, Any]:
+            return {
+                "decision": {
+                    "type": "ask",
+                    "payload": {
+                        "question": {"text": "这是 DeepSeek 生成的问题吗？"}
+                    },
+                },
+                "payload": {
+                    "primary_question": {
+                        "value": "这是 DeepSeek 生成的问题吗？"
+                    }
+                },
+            }
+
+    monkeypatch.setattr(settings, "ENABLE_DS_CONTROLLER", True)
+
+    orchestrator = LangGraphMini.__new__(LangGraphMini)
+    orchestrator.deepseek = _ControllerDeepSeek()
+    orchestrator.repo = _DummyRepo()
+    orchestrator.ITEM_NAMES = {1: "条目1"}
+
+    state = SessionState(sid="sid", index=1)
+    question = LangGraphMini._generate_primary_question(
+        orchestrator,
+        "sid",
+        state,
+        1,
+        [],
+        [],
+    )
+
+    assert question == "这是 DeepSeek 生成的问题吗？"
+
+
 def test_generate_primary_question_marks_notice_on_ds_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

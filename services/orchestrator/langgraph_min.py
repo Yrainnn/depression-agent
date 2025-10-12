@@ -171,6 +171,73 @@ class LangGraphMini:
             turn_type="ask",
         )
 
+    @staticmethod
+    def _extract_controller_action(payload: Any) -> Optional[str]:
+        if isinstance(payload, str):
+            return payload or None
+        if isinstance(payload, dict):
+            for key in ("action", "decision", "type"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            # Some controllers may nest the actual action deeper.
+            for key in ("decision", "result", "payload"):
+                nested = payload.get(key)
+                action = LangGraphMini._extract_controller_action(nested)
+                if action:
+                    return action
+        return None
+
+    @staticmethod
+    def _extract_controller_question(payload: Any) -> Optional[str]:
+        def _unwrap(value: Any) -> Optional[str]:
+            if isinstance(value, str):
+                text = value.strip()
+                return text or None
+            if isinstance(value, dict):
+                for key in (
+                    "next_utterance",
+                    "question",
+                    "utterance",
+                    "primary_question",
+                    "text",
+                    "content",
+                    "value",
+                ):
+                    candidate = _unwrap(value.get(key))
+                    if candidate:
+                        return candidate
+                # Allow nested payloads such as {"data": {...}}
+                for key in ("data", "result", "payload"):
+                    candidate = _unwrap(value.get(key))
+                    if candidate:
+                        return candidate
+                return None
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    candidate = _unwrap(item)
+                    if candidate:
+                        return candidate
+            return None
+
+        if isinstance(payload, dict):
+            # First try top-level fields.
+            for key in (
+                "next_utterance",
+                "question",
+                "primary_question",
+                "utterance",
+            ):
+                candidate = _unwrap(payload.get(key))
+                if candidate:
+                    return candidate
+            # Then inspect nested decision metadata.
+            for key in ("decision", "data", "result", "payload"):
+                candidate = _unwrap(payload.get(key))
+                if candidate:
+                    return candidate
+        return _unwrap(payload)
+
     def _coerce_controller_decision(
         self, raw: Any, progress: Optional[Dict[str, Any]] = None
     ) -> Optional[ControllerDecision]:
@@ -183,14 +250,32 @@ class LangGraphMini:
             return None
 
         data = dict(raw)
-        action = data.get("action") or data.get("decision") or "ask"
-        question = data.get("next_utterance") or data.get("question")
+        decision_block = data.get("decision")
+        action = self._extract_controller_action(data)
+        if not action and isinstance(decision_block, dict):
+            action = self._extract_controller_action(decision_block)
+        if not action:
+            action = "ask"
+
+        question = self._extract_controller_question(data)
+        if not question and isinstance(decision_block, dict):
+            question = self._extract_controller_question(decision_block)
+
         data.setdefault("action", action)
         data.setdefault("decision", action)
-        data.setdefault("next_utterance", question)
-        data.setdefault("question", question)
+        if question:
+            data.setdefault("next_utterance", question)
+            data.setdefault("question", question)
+        elif "next_utterance" not in data:
+            data["next_utterance"] = ""
+        if "question" not in data:
+            data["question"] = data.get("next_utterance")
+
         if "current_item_id" not in data and progress is not None:
-            data["current_item_id"] = progress.get("index") or 0
+            item_id = (
+                (progress.get("index") if isinstance(progress, dict) else None) or 0
+            )
+            data["current_item_id"] = item_id
 
         clarify_prompt = data.get("clarify_prompt")
         if clarify_prompt and not data.get("clarify_target"):
@@ -697,6 +782,17 @@ class LangGraphMini:
             question = (decision.next_utterance or "").strip()
             if question:
                 return question
+
+        fallback_from_payload = self._extract_controller_question(decision_payload)
+        if fallback_from_payload:
+            stripped = fallback_from_payload.strip()
+            if stripped:
+                LOGGER.debug(
+                    "Using controller payload question fallback for %s (item %s)",
+                    sid,
+                    item_id,
+                )
+                return stripped
 
         LOGGER.debug(
             "DeepSeek question generation returned no utterance for %s (item %s)",
