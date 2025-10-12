@@ -141,6 +141,7 @@ import pytest
 
 from services.llm.json_client import HAMDItem, HAMDResult, HAMDTotal
 from services.orchestrator.langgraph_min import LangGraphMini, SessionState
+from services.orchestrator.questions_hamd17 import pick_primary
 
 
 settings = config_stub.settings
@@ -184,50 +185,97 @@ class _DummyDeepSeek:
         return None
 
 
-def _make_result(items: List[HAMDItem]) -> HAMDResult:
-    return HAMDResult(
-        items=items,
+def test_generate_primary_question_fallback_to_question_bank() -> None:
+    orchestrator = LangGraphMini.__new__(LangGraphMini)
+    orchestrator.deepseek = _DummyDeepSeek()
+    orchestrator.repo = _DummyRepo()
+    orchestrator.ITEM_NAMES = {2: "条目2"}
+    orchestrator.ITEM_NAMES = {2: "条目2"}
+
+    state = SessionState(sid="sid", index=1)
+    question = LangGraphMini._generate_primary_question(
+        orchestrator,
+        "sid",
+        state,
+        1,
+        [],
+        [],
+    )
+
+    assert question == pick_primary(1)
+
+
+def test_fallback_flow_uses_deepseek_clarify_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = LangGraphMini.__new__(LangGraphMini)
+    orchestrator.deepseek = _DummyDeepSeek()
+    orchestrator.repo = _DummyRepo()
+    orchestrator.ITEM_NAMES = {2: "条目2"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_make_response(
+        self,
+        sid: str,
+        state: SessionState,
+        text: str,
+        *,
+        turn_type: str = "ask",
+        extra: Optional[Dict[str, Any]] = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        captured["next_utterance"] = text
+        captured["turn_type"] = turn_type
+        if extra:
+            captured.update(extra)
+        return {"next_utterance": text, "turn_type": turn_type}
+
+    monkeypatch.setattr(LangGraphMini, "_make_response", _fake_make_response)
+
+    result = HAMDResult(
+        items=[
+            HAMDItem(
+                item_id=2,
+                symptom_summary="信息有限",
+                dialogue_evidence="描述不足",
+                score=0,
+                score_type="类型4",
+                score_reason="缺少信息",
+                clarify_need=True,
+                clarify_prompt="请再详细描述一下频次好吗？",
+            )
+        ],
         total_score=HAMDTotal(
             得分序列="0", pre_correction_total=0, corrected_total=0, correction_basis=""
         ),
     )
 
-
-def test_clarify_does_not_jump_to_previous_items() -> None:
-    orchestrator = LangGraphMini.__new__(LangGraphMini)
-    orchestrator.deepseek = _DummyDeepSeek()
-    orchestrator.ITEM_NAMES = {3: "自杀倾向", 15: "疑病倾向"}
-
-    state = SessionState(sid="sid", index=15)
-
-    result = _make_result(
-        [
-            HAMDItem(
-                item_id=3,
-                symptom_summary="信息有限",
-                dialogue_evidence="描述不足",
-                evidence_refs=[],
-                score=0,
-                score_type="类型4",
-                score_reason="缺少信息",
-                clarify_need="频次",
-            ),
-            HAMDItem(
-                item_id=15,
-                symptom_summary="描述完整",
-                dialogue_evidence="已经说明",
-                evidence_refs=[],
-                score=2,
-                score_type="类型1",
-                score_reason="完整",
-                clarify_need=None,
-            ),
-        ]
+    monkeypatch.setattr(
+        LangGraphMini,
+        "_run_ds_analysis_stream",
+        lambda self, dialogue: result,
     )
 
-    clarify = LangGraphMini._clarify_from_analysis(orchestrator, state, result, [])
+    state = SessionState(sid="sid", index=2)
 
-    assert clarify is None
+    orchestrator._fallback_flow(
+        sid="sid",
+        state=state,
+        item_id=2,
+        scoring_segments=[],
+        dialogue=[{"role": "user", "text": "描述"}],
+        transcripts=[],
+        user_text="描述",
+    )
+
+    assert captured["turn_type"] == "clarify"
+    assert captured["next_utterance"] == "请再详细描述一下频次好吗？"
+    assert orchestrator.repo.last_set == (
+        "sid",
+        2,
+        "请再详细描述一下频次好吗？",
+    )
 
 
 def test_fallback_flow_preserves_existing_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -262,7 +310,7 @@ def test_fallback_flow_preserves_existing_analysis(monkeypatch: pytest.MonkeyPat
     state = SessionState(sid="sid", index=1)
     state.analysis = {"items": ["previous"]}
 
-    monkeypatch.setattr(LangGraphMini, "_run_deepseek_analysis", lambda self, dialogue: None)
+    monkeypatch.setattr(LangGraphMini, "_run_ds_analysis_stream", lambda self, dialogue: None)
     monkeypatch.setattr(
         LangGraphMini,
         "_score_current_item",

@@ -6,7 +6,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from time import monotonic
+from typing import Any, Dict, Iterable, List, Optional
 
 from packages.common.config import settings
 from services.audio.asr_adapter import AsrError, StubASR, TingwuClientASR
@@ -157,7 +158,11 @@ class LangGraphMini:
             return self._complete_payload(state, COMPLETION_TEXT)
 
         item_id = self._current_item_id(state)
-        question = pick_primary(item_id)
+        transcripts = self.repo.get_transcripts(sid) or []
+        dialogue = self._build_dialogue_payload(sid, transcripts)
+        question = self._generate_primary_question(
+            sid, state, item_id, transcripts, dialogue
+        )
         return self._make_response(
             sid,
             state,
@@ -183,7 +188,15 @@ class LangGraphMini:
 
         if not text and not audio_ref:
             # 沿用当前条目，不要重置回首问
-            question = pick_primary(self._current_item_id(state))
+            transcripts = self.repo.get_transcripts(sid) or []
+            dialogue = self._build_dialogue_payload(sid, transcripts)
+            question = self._generate_primary_question(
+                sid,
+                state,
+                self._current_item_id(state),
+                transcripts,
+                dialogue,
+            )
             response = self._make_response(
                 sid,
                 state,
@@ -216,7 +229,7 @@ class LangGraphMini:
             self.repo.append_transcript(sid, segment)
             LOGGER.debug("Appended transcript for %s: %s", sid, segment)
 
-        transcripts = self.repo.get_transcripts(sid)
+        transcripts = self.repo.get_transcripts(sid) or []
 
         hold_payload = self._handle_risk_hold(sid, state, prepared_segments)
         if hold_payload is not None:
@@ -234,8 +247,16 @@ class LangGraphMini:
         if report_payload is not None:
             return report_payload
 
+        dialogue_payload = self._build_dialogue_payload(sid, transcripts)
+
         if not asked_primary:
-            question = pick_primary(self._current_item_id(state))
+            question = self._generate_primary_question(
+                sid,
+                state,
+                self._current_item_id(state),
+                transcripts,
+                dialogue_payload,
+            )
             return self._make_response(
                 sid,
                 state,
@@ -247,8 +268,6 @@ class LangGraphMini:
         scoring_segments = self._latest_segments(
             transcripts, self.window_n, self.window_seconds
         )
-
-        dialogue_payload = self._build_dialogue_payload(sid)
         current_progress = {"index": item_id, "total": TOTAL_ITEMS}
 
         controller_enabled = (
@@ -591,6 +610,37 @@ class LangGraphMini:
                     continue
                 payload[key] = value
         return payload
+
+    def _generate_primary_question(
+        self,
+        sid: str,
+        state: SessionState,
+        item_id: int,
+        transcripts: Optional[List[Dict[str, Any]]],
+        dialogue: List[Dict[str, Any]],
+    ) -> str:
+        fallback = pick_primary(item_id)
+        if not self.deepseek.usable():
+            return fallback
+
+        progress = {"index": item_id, "total": TOTAL_ITEMS}
+        try:
+            decision = self.deepseek.plan_turn(
+                dialogue,
+                progress,
+                prompt=get_prompt_hamd17(),
+            )
+        except DeepSeekTemporarilyUnavailableError as exc:
+            LOGGER.debug("DeepSeek question generation unavailable for %s: %s", sid, exc)
+            return fallback
+        except Exception as exc:  # pragma: no cover - runtime guard
+            LOGGER.info("DeepSeek question generation failed for %s: %s", sid, exc)
+            return fallback
+
+        if decision and decision.next_utterance:
+            return decision.next_utterance
+
+        return fallback
 
     def _maybe_handle_report_request(
         self, sid: str, state: SessionState, user_text: Optional[str]
@@ -1197,11 +1247,22 @@ class LangGraphMini:
         transcripts: List[Dict[str, Any]],
         user_text: Optional[str],
     ) -> Dict[str, Any]:
-        analysis_result = self._run_deepseek_analysis(dialogue)
+        analysis_result = self._run_ds_analysis_stream(dialogue)
         extra_payload: Dict[str, Any] = {}
+        clarify_prompt: Optional[str] = None
+        clarify_item_id: Optional[int] = None
 
         if analysis_result:
             self._store_analysis_scores(sid, state, analysis_result)
+            target_item = next(
+                (item for item in analysis_result.items if item.item_id == item_id),
+                None,
+            )
+            if target_item and target_item.clarify_need:
+                clarify_item_id = target_item.item_id
+                clarify_prompt = target_item.clarify_prompt or pick_clarify(
+                    target_item.item_id, ""
+                )
         else:
             score_result = self._score_current_item(state, scoring_segments, dialogue)
             if score_result:
@@ -1209,19 +1270,9 @@ class LangGraphMini:
                 state.opinion = score_result.get("opinion") or state.opinion
                 state.analysis = self._analysis_from_scores(state)
 
-        if state.analysis is not None:
-            extra_payload["analysis"] = copy.deepcopy(state.analysis)
-        else:
-            extra_payload["analysis"] = None
-
-        active_clarify_need: Optional[str] = None
-        if analysis_result:
-            target_item = next(
-                (item for item in analysis_result.items if item.item_id == item_id),
-                None,
-            )
-            if target_item:
-                active_clarify_need = target_item.clarify_need or None
+        extra_payload["analysis"] = (
+            copy.deepcopy(state.analysis) if state.analysis is not None else None
+        )
 
         try:
             last_clarify = self.repo.get_last_clarify_need(sid)
@@ -1229,35 +1280,25 @@ class LangGraphMini:
             LOGGER.exception("Failed to read last clarify target for %s", sid)
             last_clarify = None
 
-        if last_clarify and last_clarify.get("item_id") == item_id:
-            stored_need = last_clarify.get("need")
-            if not active_clarify_need or stored_need != active_clarify_need:
-                try:
-                    self.repo.clear_last_clarify_need(sid)
-                except Exception:  # pragma: no cover - runtime guard
-                    LOGGER.exception("Failed to clear clarify target for %s", sid)
+        if not clarify_prompt and last_clarify and last_clarify.get("item_id") == item_id:
+            try:
+                self.repo.clear_last_clarify_need(sid)
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to clear clarify target for %s", sid)
 
-        clarify_payload: Optional[Tuple[str, int, str]] = None
-        if analysis_result and user_text and state.clarify < 2:
-            clarify_payload = self._clarify_from_analysis(
-                state, analysis_result, dialogue
-            )
-
-        if clarify_payload:
-            clarify_question, clarify_item_id, clarify_need = clarify_payload
-            if clarify_need:
-                try:
-                    self.repo.set_last_clarify_need(
-                        sid, clarify_item_id, clarify_need
-                    )
-                except Exception:  # pragma: no cover - runtime guard
-                    LOGGER.exception("Failed to persist clarify target for %s", sid)
+        if clarify_prompt and state.clarify < 2:
+            try:
+                self.repo.set_last_clarify_need(
+                    sid, clarify_item_id or item_id, clarify_prompt
+                )
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to persist clarify target for %s", sid)
             state.clarify += 1
             self._persist_state(state)
             return self._make_response(
                 sid,
                 state,
-                clarify_question,
+                clarify_prompt,
                 turn_type="clarify",
                 extra=extra_payload,
             )
@@ -1267,7 +1308,9 @@ class LangGraphMini:
         next_item = get_next_item(item_id)
         if next_item != -1:
             self._advance_to(sid, next_item, state)
-            next_question = pick_primary(next_item)
+            next_question = self._generate_primary_question(
+                sid, state, next_item, transcripts, dialogue
+            )
             return self._make_response(
                 sid,
                 state,
@@ -1420,9 +1463,36 @@ class LangGraphMini:
             return "出现一定情绪波动，可继续观察并保持健康习惯。"
         return "当前情绪评分较低，如有需要仍可与专业人士交流。"
 
-    def _build_dialogue_payload(self, sid: str) -> List[Dict[str, Any]]:
+    def _build_dialogue_payload(
+        self,
+        sid: str,
+        transcripts: Optional[List[Dict[str, Any]]] = None,
+        *,
+        window_turns: int = 3,
+    ) -> List[Dict[str, Any]]:
+        source = transcripts
+        if source is None:
+            source = self.repo.get_transcripts(sid) or []
+
+        trimmed: List[Dict[str, Any]] = []
+        assistant_turns = 0
+        user_turns = 0
+        for segment in reversed(source):
+            role = segment.get("role")
+            if not role:
+                role = "assistant" if segment.get("speaker") != "patient" else "user"
+            if role == "assistant":
+                assistant_turns += 1
+            elif role == "user":
+                user_turns += 1
+            trimmed.append(segment)
+            if assistant_turns >= window_turns and user_turns >= window_turns:
+                break
+
+        trimmed.reverse()
+
         dialogue: List[Dict[str, Any]] = []
-        for segment in self.repo.get_transcripts(sid):
+        for segment in trimmed:
             role = segment.get("role")
             if not role:
                 role = "assistant" if segment.get("speaker") != "patient" else "user"
@@ -1430,7 +1500,8 @@ class LangGraphMini:
                 "sid": sid,
                 "utt_id": segment.get("utt_id"),
                 "role": role,
-                "type": segment.get("type") or ("ask" if role == "assistant" else "answer"),
+                "type": segment.get("type")
+                or ("ask" if role == "assistant" else "answer"),
                 "text": segment.get("text", ""),
                 "ts": segment.get("ts") or [0, 0],
                 "sentiment": segment.get("sentiment", "中性"),
@@ -1438,19 +1509,30 @@ class LangGraphMini:
             dialogue.append(entry)
         return dialogue
 
-    def _run_deepseek_analysis(self, dialogue: List[Dict[str, Any]]) -> Optional[HAMDResult]:
-        if not dialogue:
+    def _run_ds_analysis_stream(
+        self, dialogue: List[Dict[str, Any]]
+    ) -> Optional[HAMDResult]:
+        if not dialogue or not self.deepseek.usable():
             return None
-        if not self.deepseek.usable():
-            return None
+        started = monotonic()
         try:
-            return self.deepseek.analyze(dialogue, get_prompt_hamd17())
+            result = self.deepseek.analyze(
+                dialogue,
+                get_prompt_hamd17(),
+                stream=True,
+            )
+            elapsed = monotonic() - started
+            LOGGER.debug("DeepSeek analysis stream completed in %.2fs", elapsed)
+            return result
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek analysis temporarily unavailable: %s", exc)
             return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analysis skipped: %s", exc)
             return None
+        finally:
+            if 'elapsed' not in locals():
+                LOGGER.debug("DeepSeek analysis stream aborted after %.2fs", monotonic() - started)
 
     def _store_analysis_scores(
         self, sid: str, state: SessionState, result: HAMDResult
@@ -1467,7 +1549,7 @@ class LangGraphMini:
                     "score_reason": item.score_reason,
                     "dialogue_evidence": getattr(item, "dialogue_evidence", None),
                     "symptom_summary": getattr(item, "symptom_summary", None),
-                    "clarify_need": item.clarify_need,
+                    "clarify_need": item.clarify_prompt if item.clarify_need else None,
                 }
             )
             if normalized:
@@ -1496,30 +1578,5 @@ class LangGraphMini:
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to persist DeepSeek result for %s", sid)
         self._persist_state(state)
-
-    def _clarify_from_analysis(
-        self,
-        state: SessionState,
-        result: HAMDResult,
-        dialogue: List[Dict[str, Any]],
-    ) -> Optional[Tuple[str, int, str]]:
-        current_item = self._current_item_id(state)
-        target = next(
-            (
-                item
-                for item in result.items
-                if item.item_id == current_item and item.score_type == "类型4" and item.clarify_need
-            ),
-            None,
-        )
-        if target is None:
-            return None
-        clarify_need = target.clarify_need or ""
-        evidence_text = "；".join(
-            [entry.get("text", "") for entry in dialogue if entry.get("role") == "user"][-2:]
-        )
-        question = pick_clarify(target.item_id, clarify_need)
-        return question, target.item_id, clarify_need
-
 
 orchestrator = LangGraphMini()
