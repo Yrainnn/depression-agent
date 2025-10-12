@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     prompt_mdd_judgment_path: Optional[str] = Field(None, alias="PROMPT_MDD_JUDGMENT_PATH")
     prompt_clarify_cn_path: Optional[str] = Field(None, alias="PROMPT_CLARIFY_CN_PATH")
     enable_ds_controller: bool = Field(True, alias="ENABLE_DS_CONTROLLER")
+    log_level: str = Field("INFO", alias="LOG_LEVEL")
     deepseek_chat_timeout: float = Field(90.0, alias="DEEPSEEK_CHAT_TIMEOUT")
     deepseek_clarify_timeout: float = Field(60.0, alias="DEEPSEEK_CLARIFY_TIMEOUT")
     deepseek_controller_timeout: float = Field(90.0, alias="DEEPSEEK_CONTROLLER_TIMEOUT")
@@ -191,6 +192,10 @@ class Settings(BaseSettings):
     @property
     def DEEPSEEK_CHAT_TIMEOUT(self) -> float:
         return self.deepseek_chat_timeout
+
+    @property
+    def LOG_LEVEL(self) -> str:
+        return self.log_level
 
     @property
     def DEEPSEEK_CLARIFY_TIMEOUT(self) -> float:
