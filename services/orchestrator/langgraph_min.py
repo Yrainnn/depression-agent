@@ -307,6 +307,8 @@ class LangGraphMini:
             return self._complete_payload(state, COMPLETION_TEXT)
 
         asked_primary = self._has_asked_any_primary(sid)
+        item_id = self._current_item_id(state)
+        print(f"🧠 进入 step(), 当前题号={item_id}", flush=True)
 
         if not text and not audio_ref:
             # 沿用当前条目，不要重置回首问
@@ -315,7 +317,7 @@ class LangGraphMini:
             question = self._generate_primary_question(
                 sid,
                 state,
-                self._current_item_id(state),
+                item_id,
                 transcripts,
                 dialogue,
             )
@@ -441,11 +443,16 @@ class LangGraphMini:
 
         decision: Optional[ControllerDecision] = None
         try:
+            print(
+                f"🧩 调用 DeepSeek 控制器生成第{item_id}题或澄清问",
+                flush=True,
+            )
             decision_payload = self.deepseek.plan_turn(
                 dialogue_payload,
                 current_progress,
                 prompt=get_prompt_hamd17_controller(),
             )
+            print(f"🤖 DeepSeek 返回: {decision_payload}", flush=True)
             decision = self._coerce_controller_decision(decision_payload, current_progress)
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek controller temporarily unavailable for %s: %s", sid, exc)
@@ -506,6 +513,7 @@ class LangGraphMini:
             state.analysis = None
 
         if not decision:
+            print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
             state.controller_unusable_turn = state.last_utt_index
             self._persist_state(state)
             return self._fallback_flow(
@@ -526,7 +534,11 @@ class LangGraphMini:
         if state.analysis:
             extra["analysis"] = state.analysis
 
-        next_utt = decision.next_utterance or "请继续描述。"
+        controller_text = (decision.next_utterance or "").strip()
+        if not controller_text:
+            extracted_text = self._extract_controller_question(decision_payload)
+            controller_text = (extracted_text or "").strip()
+
         forced_target: Optional[int] = None
         try:
             last_clarify = self.repo.get_last_clarify_need(sid)
@@ -534,10 +546,10 @@ class LangGraphMini:
             LOGGER.exception("Failed to load last clarify target for %s", sid)
             last_clarify = None
 
-        decision_action = decision.action
+        decision_action = (decision.action or "ask").lower()
 
         if (
-            decision.action == "clarify"
+            decision_action == "clarify"
             and last_clarify
             and (user_text or prepared_segments)
         ):
@@ -549,9 +561,15 @@ class LangGraphMini:
             forced_target = get_next_item(item_id)
             if forced_target == -1:
                 decision_action = "finish"
-                next_utt = COMPLETION_TEXT
+                controller_text = ""
             else:
                 decision_action = "ask"
+                controller_text = ""
+
+        if decision_action == "clarify" and state.clarify >= 2:
+            print("⚠️ 澄清次数已达上限，强制进入下一题。", flush=True)
+            decision_action = "ask"
+            controller_text = ""
 
         if decision_action == "clarify":
             if decision.clarify_target:
@@ -577,19 +595,40 @@ class LangGraphMini:
                 if isinstance(last_clarify, dict)
                 else ""
             )
-            next_utt = pick_clarify(target_item_id, clarify_gap)
+            clarify_text = controller_text or ""
+            if not clarify_text:
+                print("⚠️ DeepSeek 无有效澄清输出，回退固定澄清问。", flush=True)
+                clarify_text = pick_clarify(target_item_id, clarify_gap)
+            if not clarify_text:
+                clarify_text = pick_clarify(item_id, clarify_gap)
+            try:
+                prompt_to_store = (
+                    decision.clarify_target.clarify_need
+                    if decision.clarify_target and decision.clarify_target.clarify_need
+                    else clarify_text
+                )
+                if prompt_to_store:
+                    self.repo.set_last_clarify_need(
+                        sid, target_item_id or item_id, prompt_to_store
+                    )
+            except Exception:  # pragma: no cover - runtime guard
+                LOGGER.exception("Failed to persist clarify target for %s", sid)
             state.clarify += 1
             self._append_turn(
                 sid,
                 state,
                 role="assistant",
                 turn_type="clarify",
-                text=next_utt,
+                text=clarify_text,
+            )
+            print(
+                f"🎯 控制器动作=clarify, 输出={clarify_text}",
+                flush=True,
             )
             return self._make_response(
                 sid,
                 state,
-                next_utt,
+                clarify_text,
                 turn_type="clarify",
                 extra=extra,
                 record=False,
@@ -610,9 +649,15 @@ class LangGraphMini:
                 target_item = get_next_item(item_id)
             if target_item in (None, -1):
                 decision_action = "finish"
-                next_utt = COMPLETION_TEXT
+                controller_text = ""
             else:
-                next_utt = pick_primary(target_item)
+                ask_text = controller_text or ""
+                if not ask_text:
+                    print("⚠️ DeepSeek 无有效主问题输出，回退固定题库。", flush=True)
+                    ask_text = pick_primary(target_item)
+                controller_text = ask_text
+                state.clarify = 0
+                target_item = int(target_item)
 
         if decision_action == "ask":
             # 末条护栏：已在最后一条且没有待澄清，直接完成
@@ -656,12 +701,16 @@ class LangGraphMini:
                 state,
                 role="assistant",
                 turn_type="ask",
-                text=next_utt,
+                text=controller_text or COMPLETION_TEXT,
+            )
+            print(
+                f"🎯 控制器动作=ask, 输出={controller_text or COMPLETION_TEXT}",
+                flush=True,
             )
             return self._make_response(
                 sid,
                 state,
-                next_utt,
+                controller_text or COMPLETION_TEXT,
                 turn_type="ask",
                 extra=extra,
                 record=False,
@@ -678,7 +727,11 @@ class LangGraphMini:
             self.repo.clear_last_clarify_need(sid)
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to clear clarify target for %s", sid)
-        completion_text = next_utt or COMPLETION_TEXT
+        completion_text = controller_text or COMPLETION_TEXT
+        print(
+            f"🎯 控制器动作=finish, 输出={completion_text}",
+            flush=True,
+        )
         self._append_turn(
             sid,
             state,
