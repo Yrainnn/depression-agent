@@ -502,31 +502,7 @@ class LangGraphMini:
             state.controller_unusable_turn = None
             self._persist_state(state)
 
-        if decision.hamd_partial:
-            print("📊 检测到 HAMD 局部评分结果，开始合并...", flush=True)
-            partial_payload = decision.hamd_partial.model_dump()
-            try:
-                self.repo.merge_scores(sid, partial_payload)
-            except Exception:  # pragma: no cover - runtime guard
-                LOGGER.exception("Failed to merge partial HAMD scores for %s", sid)
-            items_payload = partial_payload.get("items") or []
-            normalized_items = [
-                entry
-                for entry in (
-                    self._normalize_score_entry(item) for item in items_payload
-                )
-                if entry
-            ]
-            if normalized_items:
-                self._merge_scores(state, normalized_items)
-            total_payload = partial_payload.get("total_score") or {}
-            total_value = self._extract_total_score(total_payload)
-            if total_value is not None:
-                print(
-                    f"✅ 当前题号={item_id} 局部评分={total_value}",
-                    flush=True,
-                )
-                state.opinion = self._opinion_from_total(total_value)
+        self._apply_controller_scores(sid, state, item_id, decision)
 
         if state.scores_acc:
             state.analysis = self._analysis_from_scores(state)
@@ -544,6 +520,8 @@ class LangGraphMini:
             flush=True,
         )
 
+        ask_target_override: Optional[int] = None
+
         clarify_target_id = decision.current_item_id or item_id
         clarify_prompt = ""
         if decision.clarify_target:
@@ -553,8 +531,73 @@ class LangGraphMini:
         if decision_action == "clarify":
             if state.clarify >= 2:
                 print("⚠️ 达到最大澄清次数上限，强制推进。", flush=True)
-                decision_action = "ask"
-                controller_text = ""
+                ask_target = decision.current_item_id or get_next_item(item_id)
+                try:
+                    ask_target_int = int(ask_target)
+                except (TypeError, ValueError):
+                    ask_target_int = get_next_item(item_id)
+                if ask_target_int in (None, -1):
+                    decision_action = "finish"
+                    controller_text = controller_text or ""
+                else:
+                    self._advance_to(sid, ask_target_int, state)
+                    print(
+                        f"📈 DeepSeek 决策推进至第 {state.index} 题。",
+                        flush=True,
+                    )
+                    ask_target_override = state.index
+                    print(
+                        f"🔁 重新调用 DeepSeek 生成第{state.index}题主问",
+                        flush=True,
+                    )
+                    followup_progress = {
+                        "index": state.index,
+                        "total": TOTAL_ITEMS,
+                    }
+                    try:
+                        followup_payload = self.deepseek.plan_turn(
+                            dialogue_payload,
+                            followup_progress,
+                            prompt=get_prompt_hamd17_controller(),
+                        )
+                        print(
+                            f"🤖 DeepSeek 返回(重新调用): {followup_payload}",
+                            flush=True,
+                        )
+                        followup_decision = self._coerce_controller_decision(
+                            followup_payload, followup_progress
+                        )
+                        self._apply_controller_scores(
+                            sid, state, state.index, followup_decision
+                        )
+                        followup_text = (
+                            (followup_decision.next_utterance or "")
+                            if followup_decision
+                            else ""
+                        ).strip()
+                        if not followup_text:
+                            extracted_followup = self._extract_controller_question(
+                                followup_payload
+                            )
+                            followup_text = (extracted_followup or "").strip()
+                        if followup_text:
+                            controller_text = followup_text
+                            decision_payload = followup_payload
+                            if followup_decision:
+                                decision = followup_decision
+                        else:
+                            print(
+                                "⚠️ DeepSeek 无输出，回退固定问题。",
+                                flush=True,
+                            )
+                            controller_text = pick_primary(state.index)
+                    except Exception as exc:  # pragma: no cover - runtime guard
+                        print(
+                            f"⚠️ DeepSeek 生成第{state.index}题失败，回退固定题库: {exc}",
+                            flush=True,
+                        )
+                        controller_text = pick_primary(state.index)
+                    decision_action = "ask"
             else:
                 state.clarify += 1
                 print(
@@ -601,19 +644,33 @@ class LangGraphMini:
                 record=False,
             )
 
-        ask_target = decision.current_item_id or get_next_item(item_id)
-        try:
-            ask_target_int = int(ask_target)
-        except (TypeError, ValueError):
-            ask_target_int = item_id
-        if ask_target_int <= item_id:
-            ask_target_int = get_next_item(item_id)
+        if ask_target_override is not None:
+            ask_target_int = ask_target_override
+        else:
+            ask_target = decision.current_item_id or get_next_item(item_id)
+            try:
+                ask_target_int = int(ask_target)
+            except (TypeError, ValueError):
+                ask_target_int = item_id
+            if ask_target_int <= item_id:
+                ask_target_int = get_next_item(item_id)
 
         if decision_action == "ask":
             if ask_target_int in (None, -1):
                 decision_action = "finish"
             else:
-                self._advance_to(sid, ask_target_int, state)
+                if ask_target_override is None:
+                    self._advance_to(sid, ask_target_int, state)
+                else:
+                    state.index = ask_target_int
+                    state.clarify = 0
+                    try:
+                        self.repo.clear_last_clarify_need(state.sid)
+                    except Exception:  # pragma: no cover - runtime guard
+                        LOGGER.exception(
+                            "Failed to clear clarify target for %s", state.sid
+                        )
+                    self._persist_state(state)
                 print(
                     f"📈 DeepSeek 决策推进至第 {state.index} 题。",
                     flush=True,
@@ -669,6 +726,38 @@ class LangGraphMini:
             extra=extra,
             record=False,
         )
+
+    def _apply_controller_scores(
+        self,
+        sid: str,
+        state: SessionState,
+        item_id: int,
+        decision: Optional[ControllerDecision],
+    ) -> None:
+        if not decision or not decision.hamd_partial:
+            return
+        print("📊 检测到 HAMD 局部评分结果，开始合并...", flush=True)
+        partial_payload = decision.hamd_partial.model_dump()
+        try:
+            self.repo.merge_scores(sid, partial_payload)
+        except Exception:  # pragma: no cover - runtime guard
+            LOGGER.exception("Failed to merge partial HAMD scores for %s", sid)
+        items_payload = partial_payload.get("items") or []
+        normalized_items = [
+            entry
+            for entry in (self._normalize_score_entry(item) for item in items_payload)
+            if entry
+        ]
+        if normalized_items:
+            self._merge_scores(state, normalized_items)
+        total_payload = partial_payload.get("total_score") or {}
+        total_value = self._extract_total_score(total_payload)
+        if total_value is not None:
+            print(
+                f"✅ 当前题号={item_id} 局部评分={total_value}",
+                flush=True,
+            )
+            state.opinion = self._opinion_from_total(total_value)
 
     # ------------------------------------------------------------------
     def _make_response(
