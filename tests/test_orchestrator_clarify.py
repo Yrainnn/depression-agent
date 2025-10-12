@@ -139,7 +139,12 @@ sys.modules["packages.common.config"] = config_stub
 
 import pytest
 
-from services.llm.json_client import HAMDItem, HAMDResult, HAMDTotal
+from services.llm.json_client import (
+    DeepSeekTemporarilyUnavailableError,
+    HAMDItem,
+    HAMDResult,
+    HAMDTotal,
+)
 from services.orchestrator.langgraph_min import LangGraphMini, SessionState
 from services.orchestrator.questions_hamd17 import pick_primary
 
@@ -203,6 +208,59 @@ def test_generate_primary_question_fallback_to_question_bank() -> None:
     )
 
     assert question == pick_primary(1)
+
+
+def test_generate_primary_question_marks_notice_on_ds_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DeepSeekRaiser:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        def usable(self) -> bool:
+            return True
+
+        def plan_turn(self, *_: Any, **__: Any) -> None:
+            raise self._exc
+
+    monkeypatch.setattr(settings, "ENABLE_DS_CONTROLLER", True)
+
+    orchestrator = LangGraphMini.__new__(LangGraphMini)
+    orchestrator.repo = _DummyRepo()
+    orchestrator.deepseek = _DeepSeekRaiser(
+        DeepSeekTemporarilyUnavailableError("temp")
+    )
+
+    state = SessionState(sid="sid", index=1)
+    question = LangGraphMini._generate_primary_question(
+        orchestrator,
+        "sid",
+        state,
+        1,
+        [],
+        [],
+    )
+
+    assert question == pick_primary(1)
+    assert state.controller_notice_logged is True
+    assert orchestrator.repo.session["sid"]["controller_notice_logged"] is True
+
+    orchestrator.repo = _DummyRepo()
+    orchestrator.deepseek = _DeepSeekRaiser(RuntimeError("boom"))
+
+    state2 = SessionState(sid="sid2", index=1)
+    question2 = LangGraphMini._generate_primary_question(
+        orchestrator,
+        "sid2",
+        state2,
+        1,
+        [],
+        [],
+    )
+
+    assert question2 == pick_primary(1)
+    assert state2.controller_notice_logged is True
+    assert orchestrator.repo.session["sid2"]["controller_notice_logged"] is True
 
 
 def test_fallback_flow_uses_deepseek_clarify_prompt(

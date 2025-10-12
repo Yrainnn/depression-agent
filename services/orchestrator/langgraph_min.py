@@ -620,7 +620,8 @@ class LangGraphMini:
         dialogue: List[Dict[str, Any]],
     ) -> str:
         fallback = pick_primary(item_id)
-        if not self.deepseek.usable():
+
+        if not settings.ENABLE_DS_CONTROLLER or not self.deepseek.usable():
             return fallback
 
         progress = {"index": item_id, "total": TOTAL_ITEMS}
@@ -632,14 +633,25 @@ class LangGraphMini:
             )
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek question generation unavailable for %s: %s", sid, exc)
+            state.controller_notice_logged = True
+            self._persist_state(state)
             return fallback
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.info("DeepSeek question generation failed for %s: %s", sid, exc)
+            state.controller_notice_logged = True
+            self._persist_state(state)
             return fallback
 
         if decision and decision.next_utterance:
-            return decision.next_utterance
+            question = (decision.next_utterance or "").strip()
+            if question:
+                return question
 
+        LOGGER.debug(
+            "DeepSeek question generation returned no utterance for %s (item %s)",
+            sid,
+            item_id,
+        )
         return fallback
 
     def _maybe_handle_report_request(
