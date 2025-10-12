@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from time import monotonic
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from time import monotonic
+
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -19,8 +20,6 @@ from services.llm.prompts import (
     get_prompt_hamd17_controller,
     get_prompt_mdd_judgment,
 )
-from services.orchestrator.gap_utils import GAP_LABELS, detect_information_gaps
-from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,13 +31,14 @@ class DeepSeekTemporarilyUnavailableError(RuntimeError):
 
 class HAMDItem(BaseModel):
     item_id: int
-    symptom_summary: str
-    dialogue_evidence: str
+    symptom_summary: Optional[str] = None
+    dialogue_evidence: Optional[str] = None
     evidence_refs: List[str] = Field(default_factory=list)
     score: int
-    score_type: str
-    score_reason: str
-    clarify_need: Optional[str] = None
+    score_type: Optional[str] = None
+    score_reason: Optional[str] = None
+    clarify_need: bool = False
+    clarify_prompt: Optional[str] = None
 
 
 class HAMDTotal(BaseModel):
@@ -51,6 +51,7 @@ class HAMDTotal(BaseModel):
 class HAMDResult(BaseModel):
     items: List[HAMDItem]
     total_score: HAMDTotal
+    summary: Optional[str] = None
 
 
 class ClarifyTarget(BaseModel):
@@ -129,6 +130,7 @@ class DeepSeekJSONClient:
         max_tokens: int = 2048,
         temperature: float = 0.2,
         timeout: Optional[float] = None,
+        stream: bool = False,
     ) -> str:
         if not self.enabled():  # pragma: no cover - guard rail
             raise RuntimeError("DeepSeek client not configured")
@@ -152,7 +154,11 @@ class DeepSeekJSONClient:
                 url_base,
             )
             self._warned_bad_base = True
-        url = url_base + "/v1/chat/completions"
+        trimmed_base = url_base.rstrip("/")
+        if trimmed_base.endswith("/v1"):
+            url = trimmed_base + "/chat/completions"
+        else:
+            url = trimmed_base + "/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
@@ -165,6 +171,8 @@ class DeepSeekJSONClient:
         }
         if response_format:
             payload["response_format"] = response_format
+        if stream:
+            payload["stream"] = True
 
         effective_timeout = self.chat_timeout if timeout is None else timeout
         with httpx.Client(timeout=effective_timeout) as client:
@@ -198,6 +206,8 @@ class DeepSeekJSONClient:
         self,
         dialogue_json: List[dict],
         system_prompt: Optional[str] = None,
+        *,
+        stream: bool = False,
     ) -> HAMDResult:
         if not self.usable():
             raise DeepSeekTemporarilyUnavailableError(
@@ -213,6 +223,7 @@ class DeepSeekJSONClient:
                 messages=messages,
                 response_format={"type": "json_object"},
                 timeout=self.chat_timeout,
+                stream=stream,
             )
             parsed = json.loads(content)
             return HAMDResult.model_validate(parsed)
@@ -220,67 +231,7 @@ class DeepSeekJSONClient:
             raise
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analyze failed: %s", exc)
-
-            latest_user_text = ""
-            latest_item_id = 1
-            for entry in reversed(dialogue_json):
-                role = entry.get("role")
-                if role == "user" and not latest_user_text:
-                    latest_user_text = entry.get("text") or ""
-                if role == "assistant" and entry.get("text"):
-                    text = str(entry.get("text"))
-                    for item_id, payload in HAMD17_QUESTION_BANK.items():
-                        questions = payload.get("primary", [])
-                        clarifies = []
-                        clarify_map = payload.get("clarify", {})
-                        for value in clarify_map.values():
-                            if isinstance(value, list):
-                                clarifies.extend(value)
-                        if any(q in text or text in q for q in questions + clarifies):
-                            latest_item_id = item_id
-                            break
-                    if latest_item_id != 1:
-                        break
-
-            gaps = detect_information_gaps(latest_user_text, item_id=latest_item_id)
-            gap_key = gaps[0] if gaps else None
-            clarify_need = GAP_LABELS.get(gap_key, None)
-
-            mock = {
-                "items": [
-                    {
-                        "item_id": latest_item_id,
-                        "symptom_summary": "信息有限",
-                        "dialogue_evidence": latest_user_text or "信息缺失",
-                        "evidence_refs": [],
-                        "score": 0,
-                        "score_type": "类型4",
-                        "score_reason": "信息不足",
-                        "clarify_need": clarify_need,
-                    }
-                ]
-                + [
-                    {
-                        "item_id": idx,
-                        "symptom_summary": "未提及",
-                        "dialogue_evidence": "未提及",
-                        "evidence_refs": [],
-                        "score": 0,
-                        "score_type": "类型3",
-                        "score_reason": "未涉及",
-                        "clarify_need": None,
-                    }
-                    for idx in range(1, 18)
-                    if idx != latest_item_id
-                ],
-                "total_score": {
-                    "得分序列": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
-                    "pre_correction_total": 0,
-                    "corrected_total": 0,
-                    "correction_basis": "类型4条目数量0，平均分0.00，修正总分=A+0.00×0≈0",
-                },
-            }
-            return HAMDResult.model_validate(mock)
+            raise
 
     def gen_clarify_question(
         self,
@@ -317,36 +268,62 @@ class DeepSeekJSONClient:
 
     def plan_turn(
         self,
-        dialogue_json: List[dict],
+        dialogue: List[dict],
         progress: dict,
-    ) -> ControllerDecision:
+        *,
+        prompt: str,
+        stream: bool = False,
+    ) -> dict:
+        """Invoke DeepSeek controller to plan the next turn."""
+
         if not self.usable():
             raise DeepSeekTemporarilyUnavailableError(
                 "DeepSeek controller planning skipped because the client is temporarily unavailable"
             )
-        prompt = get_prompt_hamd17_controller()
+
+        import time
+
+        start = time.time()
+        print("🔥 DeepSeek plan_turn 已执行", flush=True)
+
+        payload = {
+            "dialogue": dialogue,
+            "progress": progress,
+            "instruction": prompt,
+        }
         messages = [
             {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "dialogue_json": dialogue_json,
-                        "progress": progress,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
-        content = self._post_chat(
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=2048,
-            temperature=0.2,
-            timeout=self.controller_timeout,
-        )
-        data = json.loads(content)
-        return ControllerDecision.model_validate(data)
+
+        fallback: dict = {"decision": "ask", "question": None}
+        content: Optional[Any] = None
+
+        try:
+            content = self._post_chat(
+                messages=messages,
+                response_format={"type": "json_object"},
+                timeout=self.controller_timeout,
+                stream=stream,
+            )
+            elapsed = time.time() - start
+            print(f"⏱️ DeepSeek 调用耗时 {elapsed:.2f} 秒", flush=True)
+            data = json.loads(content) if isinstance(content, str) else content
+            if not isinstance(data, dict):
+                raise ValueError("DeepSeek plan_turn payload must be a JSON object")
+            LOGGER.info(
+                "[DeepSeek plan_turn] 调用成功 - action=%s question=%s",
+                data.get("decision") or data.get("action"),
+                data.get("question") or data.get("next_utterance"),
+            )
+            return data
+        except json.JSONDecodeError:
+            print(f"⚠️ DeepSeek 返回非 JSON 内容：{content}", flush=True)
+            return fallback
+        except Exception as exc:
+            print(f"❌ DeepSeek 调用失败: {exc}", flush=True)
+            LOGGER.warning(f"[DeepSeek plan_turn] 调用失败: {exc}")
+            return fallback
 
 
 # Convenience singleton -------------------------------------------------
