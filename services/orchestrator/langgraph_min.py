@@ -343,28 +343,135 @@ class LangGraphMini:
         item_id = self._current_item_id(state)
         print(f"🧠 进入 step(), 当前题号={item_id}", flush=True)
 
-        if not text and not audio_ref:
-            # 沿用当前条目，不要重置回首问
-            transcripts = self.repo.get_transcripts(sid) or []
-            dialogue = self._build_dialogue_payload(sid, transcripts)
-            question = self._generate_primary_question(
-                sid,
-                state,
-                item_id,
-                transcripts,
-                dialogue,
+        # --- single-step guard & basic flags ---
+        if not hasattr(state, "step_nonce"):
+            state.step_nonce = 0
+        state.step_nonce += 1
+        state.advanced_this_step = False
+
+        was_waiting = bool(getattr(state, "waiting_for_user", False))
+        has_input = bool(text or audio_ref)
+
+        # --- idempotent short-circuit (no input while waiting) ---
+        if was_waiting and not has_input:
+            reuse = (getattr(state, "prev_ask", {}) or {}).get("text") or pick_primary(
+                state.index
             )
-            state.prev_ask = {"item_id": item_id, "text": question}
+            print(
+                "🔁 等待输入无新内容，复读上一问 | "
+                f"当前题={state.index} | 建议题=无 | waiting={state.waiting_for_user} | "
+                f"step_nonce={state.step_nonce} | advanced_this_step={state.advanced_this_step}",
+                flush=True,
+            )
             state.waiting_for_user = True
-            response = self._make_response(
+            return self._make_response(sid, state, reuse, turn_type="ask")
+
+        # --- initial ask (no input and not waiting) ---
+        if not was_waiting and not has_input:
+            transcripts = self.repo.get_transcripts(sid) or []
+            dialogue_payload = self._build_dialogue_payload(sid, transcripts)
+            current_progress = {"index": item_id, "total": TOTAL_ITEMS}
+
+            controller_enabled = (
+                settings.ENABLE_DS_CONTROLLER and self.deepseek.usable()
+            )
+            decision: Optional[ControllerDecision] = None
+            decision_payload: Dict[str, Any] = {}
+            if controller_enabled:
+                controller_blocked = (
+                    state.controller_unusable_turn is not None
+                    and state.controller_unusable_turn == state.last_utt_index
+                )
+                if controller_blocked:
+                    LOGGER.debug(
+                        "Skipping controller ask for %s due to recent failure", sid
+                    )
+                else:
+                    try:
+                        print(
+                            f"🧩 调用 DeepSeek 控制器生成第{item_id}题或澄清问", flush=True
+                        )
+                        raw_payload = self.deepseek.plan_turn(
+                            dialogue_payload,
+                            current_progress,
+                            prompt=get_prompt_hamd17_controller(),
+                        )
+                        print(f"🤖 DeepSeek 返回: {raw_payload}", flush=True)
+                        normalized_payload = (
+                            dict(raw_payload) if isinstance(raw_payload, dict) else {}
+                        )
+                        decision = self._coerce_controller_decision(
+                            normalized_payload, current_progress
+                        )
+                        decision_payload = normalized_payload
+                    except DeepSeekTemporarilyUnavailableError as exc:
+                        LOGGER.debug(
+                            "DeepSeek controller unavailable for %s: %s", sid, exc
+                        )
+                        state.controller_unusable_turn = state.last_utt_index
+                        self._persist_state(state)
+                    except Exception as exc:  # pragma: no cover - runtime guard
+                        LOGGER.info(
+                            "DeepSeek controller failed for %s: %s", sid, exc
+                        )
+                        state.controller_unusable_turn = state.last_utt_index
+                        self._persist_state(state)
+            else:
+                if not state.controller_notice_logged:
+                    reason = (
+                        "disabled via settings"
+                        if not settings.ENABLE_DS_CONTROLLER
+                        else (
+                            "client not configured"
+                            if not self.deepseek.enabled()
+                            else "temporarily unavailable"
+                        )
+                    )
+                    LOGGER.info("DeepSeek controller unavailable for %s: %s", sid, reason)
+                    state.controller_notice_logged = True
+                    self._persist_state(state)
+
+            suggested_idx = getattr(decision, "current_item_id", None) if decision else None
+            if suggested_idx is not None:
+                try:
+                    suggested_idx = int(suggested_idx)
+                except Exception:
+                    suggested_idx = None
+
+            item_for_question = (
+                suggested_idx if suggested_idx is not None else self._current_item_id(state)
+            )
+            controller_text = (
+                (getattr(decision, "next_utterance", None) or "").strip()
+                if decision
+                else ""
+            )
+            if not controller_text:
+                controller_text = (decision_payload.get("next_utterance") or "").strip()
+            if not controller_text:
+                controller_text = pick_primary(item_for_question)
+
+            state.index = item_for_question
+            state.waiting_for_user = True
+            state.prev_ask = {"item_id": item_for_question, "text": controller_text}
+            state.asked_items.add(item_for_question)
+            state.asked_questions.add(controller_text)
+            state.last_utterance = controller_text
+
+            print(
+                "🎯 控制器动作=ask | "
+                f"当前题={state.index} | 建议题={suggested_idx if suggested_idx is not None else '无'} | "
+                f"问向题={item_for_question} | waiting={state.waiting_for_user} | "
+                f"step_nonce={state.step_nonce} | advanced_this_step={state.advanced_this_step}",
+                flush=True,
+            )
+            print(f"📢 最终输出问句: {controller_text}", flush=True)
+            return self._make_response(
                 sid,
                 state,
-                question,
+                controller_text,
                 turn_type="ask",
             )
-            response.setdefault("risk", None)
-            response.setdefault("analysis", state.analysis)
-            return response
 
         raw_segments: List[Dict[str, Any]] = []
         if text:
@@ -402,6 +509,44 @@ class LangGraphMini:
         if user_text:
             state.last_text = user_text
             state.waiting_for_user = False
+
+        # --- idempotent short-circuit when waiting for user but no new input ---
+        if was_waiting and not user_text:
+            reuse = (
+                (state.prev_ask.get("text") or "").strip()
+                if getattr(state, "prev_ask", None)
+                else ""
+            )
+            if not reuse:
+                reuse = pick_primary(state.index)
+            print(
+                "🔁 等待输入无新文本，复读上一问 | "
+                f"当前题={state.index} | 建议题=无 | waiting={state.waiting_for_user} | "
+                f"step_nonce={state.step_nonce} | advanced_this_step={state.advanced_this_step}",
+                flush=True,
+            )
+            state.waiting_for_user = True
+            return self._make_response(sid, state, reuse, turn_type="ask")
+
+        # --- dedupe same user input within conversation ---
+        sig = (user_text or "").strip()
+        if sig and getattr(state, "last_user_sig", None) == sig:
+            reuse = (
+                (state.prev_ask.get("text") or "").strip()
+                if getattr(state, "prev_ask", None)
+                else ""
+            )
+            if not reuse:
+                reuse = pick_primary(state.index)
+            print(
+                "🪞 检测到重复用户输入，复读上一问 | "
+                f"当前题={state.index} | waiting={state.waiting_for_user} | "
+                f"step_nonce={state.step_nonce} | advanced_this_step={state.advanced_this_step}",
+                flush=True,
+            )
+            state.waiting_for_user = True
+            return self._make_response(sid, state, reuse, turn_type="ask")
+        state.last_user_sig = sig
 
         report_payload = self._maybe_handle_report_request(sid, state, user_text)
         if report_payload is not None:
@@ -478,20 +623,24 @@ class LangGraphMini:
             )
 
         decision: Optional[ControllerDecision] = None
+        decision_payload: Dict[str, Any] = {}
+        decision_action = "ask"
+        controller_text = ""
+        suggested_idx: Optional[int] = None
         try:
             print(
                 f"🧩 调用 DeepSeek 控制器生成第{item_id}题或澄清问",
                 flush=True,
             )
-            decision_payload = self.deepseek.plan_turn(
+            raw_decision_payload = self.deepseek.plan_turn(
                 dialogue_payload,
                 current_progress,
                 prompt=get_prompt_hamd17_controller(),
             )
-            print(f"🤖 DeepSeek 返回: {decision_payload}", flush=True)
+            print(f"🤖 DeepSeek 返回: {raw_decision_payload}", flush=True)
 
             normalized_payload = (
-                dict(decision_payload) if isinstance(decision_payload, dict) else {}
+                dict(raw_decision_payload) if isinstance(raw_decision_payload, dict) else {}
             )
 
             decision = self._coerce_controller_decision(
@@ -499,79 +648,45 @@ class LangGraphMini:
             )
             decision_payload = normalized_payload
 
-            # 初始化状态
-            next_utterance = ""
+            controller_text = ""
             if decision and decision.next_utterance:
-                next_utterance = decision.next_utterance.strip()
-            else:
-                next_utterance = (decision_payload.get("next_utterance") or "").strip()
+                controller_text = decision.next_utterance.strip()
+            if not controller_text:
+                controller_text = (decision_payload.get("next_utterance") or "").strip()
+            if not controller_text:
+                controller_text = (decision_payload.get("question") or "").strip()
 
-            current_idx = state.index
-            action = (
-                (decision.action if decision else decision_payload.get("action"))
-                or "ask"
-            ).strip().lower()
-
-            if decision and hasattr(decision, "current_item_id") and decision.current_item_id is not None:
-                target_idx = decision.current_item_id
-                item_id = target_idx
-            else:
-                target_idx = current_idx
-                item_id = target_idx
-
-            print(
-                "🎯 最终题号决策: 控制器建议=", getattr(decision, "current_item_id", "无"),
-                ", 实际使用=", item_id,
-                sep="",
-                flush=True,
+            decision_action = (
+                (getattr(decision, "action", None) or decision_payload.get("action") or "ask")
+                .strip()
+                .lower()
             )
 
+            raw_suggested = getattr(decision, "current_item_id", None)
+            if raw_suggested is None:
+                raw_suggested = decision_payload.get("current_item_id")
+            suggested_idx = try_int(raw_suggested)
 
             if decision:
-                decision.action = action or "ask"
-                decision.current_item_id = item_id
-                if not next_utterance and decision.next_utterance:
-                    next_utterance = decision.next_utterance.strip()
-            decision_payload["action"] = action or "ask"
-            decision_payload["current_item_id"] = item_id
+                decision.action = decision_action or "ask"
+                decision.next_utterance = controller_text
+                if suggested_idx is not None:
+                    decision.current_item_id = suggested_idx
+            decision_payload["action"] = decision_action or "ask"
+            decision_payload["current_item_id"] = (
+                suggested_idx if suggested_idx is not None else state.index
+            )
+            decision_payload["next_utterance"] = controller_text
 
-            ask_text = next_utterance or ""
-            if not ask_text:
-                ask_text = (decision_payload.get("question") or "").strip()
-            ask_text = ask_text.strip()
-            if not ask_text:
-                ask_text = pick_primary(item_id)
-
-            # --- 澄清控制 ---
-            if action == "clarify":
+            if decision_action == "clarify":
                 state.clarify_count += 1
                 if state.clarify_count > MAX_CLARIFY_PER_ITEM:
                     print("⚠️ 澄清次数超限，自动回退主问。", flush=True)
                     state.clarify_count = 0
-                    action = "ask"
-                    ask_text = pick_primary(item_id)
+                    decision_action = "ask"
+                    controller_text = pick_primary(state.index)
             else:
                 state.clarify_count = 0
-
-            # --- 文本去重（仅对新生成的问句） ---
-            if action == "ask" and not state.waiting_for_user:
-                if ask_text in state.asked_questions:
-                    print(
-                        f"⚠️ 检测到重复问句：{ask_text}，回退题库主问。",
-                        flush=True,
-                    )
-                    ask_text = pick_primary(item_id)
-                state.asked_questions.add(ask_text)
-                state.asked_items.add(item_id)
-
-            if decision:
-                decision.action = action or "ask"
-                decision.next_utterance = ask_text
-            decision_payload["action"] = action or "ask"
-            decision_payload["next_utterance"] = ask_text
-
-            if action != "finish" and ask_text:
-                state.last_utterance = ask_text
 
             state.valid_ds = decision_is_valid(decision)
         except DeepSeekTemporarilyUnavailableError as exc:
@@ -649,13 +764,76 @@ class LangGraphMini:
             extracted_text = self._extract_controller_question(decision_payload)
             controller_text = (extracted_text or "").strip()
 
-        decision_action = (decision.action or "ask").lower()
+        decision_action = (
+            (getattr(decision, "action", None) or decision_payload.get("action") or "ask")
+            .strip()
+            .lower()
+        )
+
+        suggested_idx = getattr(decision, "current_item_id", None)
+        if suggested_idx is not None:
+            try:
+                suggested_idx = int(suggested_idx)
+            except Exception:
+                suggested_idx = None
+
+        current_idx_before_advance = state.index
         print(
-            f"🎯 控制器动作={decision_action}, 输出={controller_text or 'None'}",
+            "🎯 最终题号决策 | "
+            f"当前题={current_idx_before_advance} | 建议题="
+            f"{suggested_idx if suggested_idx is not None else '无'} | "
+            f"waiting={state.waiting_for_user} | step_nonce={state.step_nonce} | "
+            f"advanced_this_step={state.advanced_this_step}",
             flush=True,
         )
 
-        clarify_target_id = decision.current_item_id or item_id
+        if state.analysis:
+            extra: Dict[str, Any] = {"analysis": state.analysis}
+        else:
+            extra = {}
+
+        ask_target = (
+            suggested_idx if suggested_idx is not None else get_next_item(current_idx_before_advance)
+        )
+        if ask_target is not None and ask_target <= current_idx_before_advance:
+            ask_target = get_next_item(current_idx_before_advance)
+
+        ready_to_advance = (
+            has_input
+            and not getattr(state, "waiting_for_user", False)
+            and decision_action != "clarify"
+        )
+        print(
+            "🧮 推进判定 | "
+            f"当前题={current_idx_before_advance} | 建议题="
+            f"{suggested_idx if suggested_idx is not None else '无'} | "
+            f"目标题={ask_target if ask_target is not None else '无'} | "
+            f"ready_to_advance={ready_to_advance} | waiting={state.waiting_for_user} | "
+            f"step_nonce={state.step_nonce} | advanced_this_step={state.advanced_this_step}",
+            flush=True,
+        )
+
+        if ready_to_advance:
+            if ask_target in (None, -1):
+                decision_action = "finish"
+            else:
+                target = ask_target
+                try:
+                    target = int(target) if target is not None else None
+                except (TypeError, ValueError):
+                    target = get_next_item(current_idx_before_advance)
+                if target is None or target in (-1, current_idx_before_advance):
+                    print("🔄 继续当前题目流程（无推进）。", flush=True)
+                else:
+                    if target <= current_idx_before_advance:
+                        target = get_next_item(current_idx_before_advance)
+                    if target is not None and target not in (-1, current_idx_before_advance):
+                        self._advance_once(sid, target, state)
+                    else:
+                        print("🔄 继续当前题目流程（无推进）。", flush=True)
+
+        current_idx = state.index
+        clarify_target_id = suggested_idx or current_idx
         clarify_prompt = ""
         if decision.clarify_target:
             clarify_target_id = decision.clarify_target.item_id or clarify_target_id
@@ -663,16 +841,12 @@ class LangGraphMini:
 
         if decision_action == "clarify":
             print(
-                f"🗣️ DeepSeek 要求继续澄清，第 {state.clarify_count} 次。",
+                "🗣️ DeepSeek 要求继续澄清 | "
+                f"当前题={current_idx} | 建议题={suggested_idx if suggested_idx is not None else '无'} | "
+                f"waiting={state.waiting_for_user} | step_nonce={state.step_nonce} | "
+                f"advanced_this_step={state.advanced_this_step}",
                 flush=True,
             )
-
-        if state.analysis:
-            extra: Dict[str, Any] = {"analysis": state.analysis}
-        else:
-            extra = {}
-
-        if decision_action == "clarify":
             clarify_text = controller_text
             if not clarify_text:
                 if state.valid_ds:
@@ -684,19 +858,20 @@ class LangGraphMini:
                     print("⚠️ 触发 fallback（DeepSeek 输出无效）。", flush=True)
                 clarify_text = pick_clarify(clarify_target_id, clarify_prompt)
             if not clarify_text:
-                clarify_text = pick_clarify(item_id, clarify_prompt)
+                clarify_text = pick_clarify(current_idx, clarify_prompt)
             try:
                 prompt_to_store = clarify_prompt or clarify_text
                 if prompt_to_store:
                     self.repo.set_last_clarify_need(
                         sid,
-                        clarify_target_id or item_id,
+                        clarify_target_id or current_idx,
                         prompt_to_store,
                     )
             except Exception:  # pragma: no cover - runtime guard
                 LOGGER.exception("Failed to persist clarify target for %s", sid)
-            state.prev_ask = {"item_id": clarify_target_id or item_id, "text": clarify_text}
+            state.prev_ask = {"item_id": clarify_target_id or current_idx, "text": clarify_text}
             state.waiting_for_user = True
+            state.last_utterance = clarify_text
             self._append_turn(
                 sid,
                 state,
@@ -714,47 +889,39 @@ class LangGraphMini:
                 record=False,
             )
 
-        ask_target = decision.current_item_id or get_next_item(item_id)
-        try:
-            ask_target_int = int(ask_target)
-        except (TypeError, ValueError):
-            ask_target_int = item_id
-        if ask_target_int <= item_id and not state.waiting_for_user:
-            ask_target_int = get_next_item(item_id)
-
         if decision_action == "ask":
-            if ask_target_int in (None, -1):
-                decision_action = "finish"
-            elif ask_target_int == item_id:
-                print("🔁 重复发送当前题主问。", flush=True)
-            else:
-                self._advance_to(sid, ask_target_int, state)
+            current_idx = state.index
+            item_for_question = state.index
+            if not controller_text:
+                controller_text = pick_primary(item_for_question)
+            if controller_text in state.asked_questions:
                 print(
-                    f"📈 DeepSeek 决策推进至第 {state.index} 题。",
+                    f"⚠️ 检测到重复问句：{controller_text}，回退题库主问。",
                     flush=True,
                 )
-                if not controller_text:
-                    if state.valid_ds:
-                        print(
-                            "🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            "⚠️ 触发 fallback（DeepSeek 输出无效）。",
-                            flush=True,
-                        )
-                    controller_text = pick_primary(state.index)
-
-        if decision_action == "ask":
-            state.prev_ask = {"item_id": state.index, "text": controller_text}
+                controller_text = pick_primary(item_for_question)
             state.waiting_for_user = True
+            state.prev_ask = {"item_id": item_for_question, "text": controller_text}
+            if not hasattr(state, "asked_items"):
+                state.asked_items = set()
+            if not hasattr(state, "asked_questions"):
+                state.asked_questions = set()
+            state.asked_items.add(item_for_question)
+            state.asked_questions.add(controller_text)
+            state.last_utterance = controller_text
             self._append_turn(
                 sid,
                 state,
                 role="assistant",
                 turn_type="ask",
                 text=controller_text,
+            )
+            print(
+                "🎯 控制器动作=ask | "
+                f"当前题={current_idx} | 建议题={suggested_idx if suggested_idx is not None else '无'} | "
+                f"问向题={item_for_question} | waiting={state.waiting_for_user} | "
+                f"step_nonce={state.step_nonce} | advanced_this_step={state.advanced_this_step}",
+                flush=True,
             )
             print(f"📢 最终输出问句: {controller_text}", flush=True)
             return self._make_response(
@@ -1133,6 +1300,20 @@ class LangGraphMini:
             )
         except Exception:  # pragma: no cover - runtime guard
             LOGGER.exception("Failed to record assistant turn for %s", sid)
+
+    def _advance_once(self, sid: str, target: int, state: SessionState) -> None:
+        if getattr(state, "advanced_this_step", False):
+            print(
+                f"⛔️ 本轮已推进过，忽略重复推进到 {target}（step_nonce={getattr(state, 'step_nonce', '未知')}）。",
+                flush=True,
+            )
+            return
+        self._advance_to(sid, target, state)
+        state.advanced_this_step = True
+        print(
+            f"📈 推进至第 {state.index} 题（step_nonce={getattr(state, 'step_nonce', '未知')}）。",
+            flush=True,
+        )
 
     def _advance_to(
         self, sid: str, item_id: int, state: Optional[SessionState] = None
@@ -1626,7 +1807,30 @@ class LangGraphMini:
 
         next_item = get_next_item(item_id)
         if next_item != -1:
-            self._advance_to(sid, next_item, state)
+            if getattr(state, "advanced_this_step", False):
+                print(
+                    "🛡️ 控制器已推进，本轮跳过 fallback 推进。 | "
+                    f"当前题={state.index} | step_nonce={getattr(state, 'step_nonce', '未知')}",
+                    flush=True,
+                )
+                reuse_text = (
+                    (state.prev_ask.get("text") or "").strip()
+                    if getattr(state, "prev_ask", None)
+                    else ""
+                )
+                if not reuse_text:
+                    reuse_text = pick_primary(state.index)
+                state.prev_ask = {"item_id": state.index, "text": reuse_text}
+                state.waiting_for_user = True
+                return self._make_response(
+                    sid,
+                    state,
+                    reuse_text,
+                    turn_type="ask",
+                    extra=extra_payload,
+                )
+            else:
+                self._advance_once(sid, next_item, state)
             next_question = self._generate_primary_question(
                 sid, state, next_item, transcripts, dialogue
             )
