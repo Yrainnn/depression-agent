@@ -6,7 +6,9 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from time import monotonic
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from packages.common.config import settings
@@ -38,6 +40,7 @@ from services.tts.tts_adapter import TTSAdapter
 LOGGER = logging.getLogger(__name__)
 
 TOTAL_ITEMS = 17
+MAX_CLARIFY_PER_ITEM = 2
 SAFE_RISK_TEXT = (
     "我已检测到较高风险。请先确保自身安全：联系家人/朋友或当地紧急热线。如您确认“已经安全/无需帮助”，我将继续评估。"
 )
@@ -46,6 +49,13 @@ RISK_HOLD_REMINDER_TEXT = (
 )
 MISSING_INPUT_PROMPT = "未获取音频/文本，请重新描述一次好吗？"
 COMPLETION_TEXT = "本次评估完成，感谢配合。稍后可下载报告。"
+
+
+def try_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def decision_is_valid(decision: Optional[ControllerDecision]) -> bool:
@@ -100,7 +110,6 @@ class SessionState:
     sid: str
     index: int = get_first_item()
     total: int = TOTAL_ITEMS
-    clarify: int = 0
     clarify_count: int = 0
     scores_acc: List[Dict[str, Any]] = field(default_factory=list)
     completed: bool = False
@@ -113,6 +122,10 @@ class SessionState:
     controller_unusable_turn: Optional[int] = None
     asked_items: Set[int] = field(default_factory=set)
     asked_questions: Set[str] = field(default_factory=set)
+    prev_ask: Dict[str, Optional[Any]] = field(
+        default_factory=lambda: {"item_id": None, "text": None}
+    )
+    waiting_for_user: bool = False
     valid_ds: bool = False
 
 
@@ -182,6 +195,8 @@ class LangGraphMini:
         question = self._generate_primary_question(
             sid, state, item_id, transcripts, dialogue
         )
+        state.prev_ask = {"item_id": item_id, "text": question}
+        state.waiting_for_user = True
         return self._make_response(
             sid,
             state,
@@ -339,6 +354,8 @@ class LangGraphMini:
                 transcripts,
                 dialogue,
             )
+            state.prev_ask = {"item_id": item_id, "text": question}
+            state.waiting_for_user = True
             response = self._make_response(
                 sid,
                 state,
@@ -384,6 +401,7 @@ class LangGraphMini:
         user_text = self._extract_user_text(prepared_segments)
         if user_text:
             state.last_text = user_text
+            state.waiting_for_user = False
 
         report_payload = self._maybe_handle_report_request(sid, state, user_text)
         if report_payload is not None:
@@ -482,93 +500,74 @@ class LangGraphMini:
             decision_payload = normalized_payload
 
             # 初始化状态
-            ask_text = ""
+            next_utterance = ""
             if decision and decision.next_utterance:
-                ask_text = decision.next_utterance.strip()
+                next_utterance = decision.next_utterance.strip()
             else:
-                ask_text = (decision_payload.get("next_utterance") or "").strip()
+                next_utterance = (decision_payload.get("next_utterance") or "").strip()
 
-            raw_item = (
-                getattr(decision, "current_item_id", None) if decision else None
-            )
-            if not isinstance(raw_item, int):
-                raw_item = decision_payload.get("current_item_id")
-            item_id = (
-                raw_item
-                if isinstance(raw_item, int) and raw_item > 0
-                else state.index
-            )
-
+            current_idx = state.index
             action = (
                 (decision.action if decision else decision_payload.get("action"))
                 or "ask"
             ).strip().lower()
 
-            if item_id > state.index:
-                state.index = item_id
-
-            # --- 条目锁定 ---
-            if action != "clarify" and item_id in state.asked_items:
-                print(f"⚠️ 条目 {item_id} 已问过，跳过重复。", flush=True)
-                next_index_candidate = max(state.index, item_id) + 1
-                if next_index_candidate > TOTAL_ITEMS:
-                    action = "finish"
+            # 强制顺序模式：题号对齐当前 index / 顺序推进
+            target_idx = current_idx
+            if action == "ask":
+                if state.waiting_for_user:
+                    target_idx = current_idx
                 else:
-                    state.index = next_index_candidate
-                    item_id = state.index
-                    ask_text = pick_primary(state.index)
-                    action = "ask"
-            if action != "finish" and item_id not in state.asked_items:
-                state.asked_items.add(item_id)
-
-            # --- 文本去重 ---
-            if ask_text and ask_text in state.asked_questions and action != "finish":
-                print(
-                    f"⚠️ 检测到重复问句：{ask_text}，自动跳过。",
-                    flush=True,
-                )
-                next_index_candidate = state.index + 1
-                if next_index_candidate > TOTAL_ITEMS:
-                    action = "finish"
-                else:
-                    state.index = next_index_candidate
-                    item_id = state.index
-                    ask_text = pick_primary(state.index)
-                    action = "ask"
-            if ask_text:
-                state.asked_questions.add(ask_text)
-
-            # --- 澄清控制 ---
-            if action == "clarify":
-                state.clarify_count += 1
-                if state.clarify_count > 2:
-                    print("⚠️ 澄清次数超限，自动推进下一题。", flush=True)
-                    state.clarify_count = 0
-                    next_index_candidate = state.index + 1
-                    if next_index_candidate > TOTAL_ITEMS:
+                    next_idx = get_next_item(current_idx)
+                    if next_idx in (None, -1):
                         action = "finish"
+                        target_idx = current_idx
                     else:
-                        state.index = next_index_candidate
-                        item_id = state.index
-                        ask_text = pick_primary(state.index)
-                        action = "ask"
-            else:
-                state.clarify_count = 0
+                        target_idx = next_idx
+            item_id = target_idx
 
             if decision:
                 decision.action = action or "ask"
                 decision.current_item_id = item_id
-                decision.next_utterance = ask_text
+                if not next_utterance and decision.next_utterance:
+                    next_utterance = decision.next_utterance.strip()
             decision_payload["action"] = action or "ask"
             decision_payload["current_item_id"] = item_id
-            decision_payload["next_utterance"] = ask_text
 
-            if not ask_text and action != "finish":
-                replacement = pick_primary(state.index)
-                decision_payload["next_utterance"] = replacement
-                if decision:
-                    decision.next_utterance = replacement
-                ask_text = replacement
+            ask_text = next_utterance or ""
+            if not ask_text:
+                ask_text = (decision_payload.get("question") or "").strip()
+            ask_text = ask_text.strip()
+            if not ask_text:
+                ask_text = pick_primary(item_id)
+
+            # --- 澄清控制 ---
+            if action == "clarify":
+                state.clarify_count += 1
+                if state.clarify_count > MAX_CLARIFY_PER_ITEM:
+                    print("⚠️ 澄清次数超限，自动回退主问。", flush=True)
+                    state.clarify_count = 0
+                    action = "ask"
+                    ask_text = pick_primary(item_id)
+            else:
+                state.clarify_count = 0
+
+            # --- 文本去重（仅对新生成的问句） ---
+            if action == "ask" and not state.waiting_for_user:
+                if ask_text in state.asked_questions:
+                    print(
+                        f"⚠️ 检测到重复问句：{ask_text}，回退题库主问。",
+                        flush=True,
+                    )
+                    ask_text = pick_primary(item_id)
+                state.asked_questions.add(ask_text)
+                state.asked_items.add(item_id)
+
+            if decision:
+                decision.action = action or "ask"
+                decision.next_utterance = ask_text
+            decision_payload["action"] = action or "ask"
+            decision_payload["next_utterance"] = ask_text
 
             if action != "finish" and ask_text:
                 state.last_utterance = ask_text
@@ -605,6 +604,18 @@ class LangGraphMini:
                 transcripts=transcripts,
                 user_text=user_text,
             )
+
+        if decision is None and decision_payload and isinstance(decision_payload, dict):
+            safe_text = (decision_payload.get("next_utterance") or "").strip()
+            if safe_text:
+                decision = SimpleNamespace(
+                    action="ask",
+                    current_item_id=state.index,
+                    next_utterance=safe_text,
+                    clarify_target=None,
+                    hamd_partial=None,
+                )
+                state.valid_ds = True
 
         if not decision or not state.valid_ds:
             if state.valid_ds:
@@ -643,8 +654,6 @@ class LangGraphMini:
             flush=True,
         )
 
-        ask_target_override: Optional[int] = None
-
         clarify_target_id = decision.current_item_id or item_id
         clarify_prompt = ""
         if decision.clarify_target:
@@ -652,88 +661,10 @@ class LangGraphMini:
             clarify_prompt = decision.clarify_target.clarify_need or ""
 
         if decision_action == "clarify":
-            if state.clarify >= 2:
-                print("⚠️ 达到最大澄清次数上限，强制推进。", flush=True)
-                ask_target = decision.current_item_id or get_next_item(item_id)
-                try:
-                    ask_target_int = int(ask_target)
-                except (TypeError, ValueError):
-                    ask_target_int = get_next_item(item_id)
-                if ask_target_int in (None, -1):
-                    decision_action = "finish"
-                    controller_text = controller_text or ""
-                else:
-                    self._advance_to(sid, ask_target_int, state)
-                    print(
-                        f"📈 DeepSeek 决策推进至第 {state.index} 题。",
-                        flush=True,
-                    )
-                    ask_target_override = state.index
-                    print(
-                        f"🔁 重新调用 DeepSeek 生成第{state.index}题主问",
-                        flush=True,
-                    )
-                    followup_progress = {
-                        "index": state.index,
-                        "total": TOTAL_ITEMS,
-                    }
-                    try:
-                        followup_payload = self.deepseek.plan_turn(
-                            dialogue_payload,
-                            followup_progress,
-                            prompt=get_prompt_hamd17_controller(),
-                        )
-                        print(
-                            f"🤖 DeepSeek 返回(重新调用): {followup_payload}",
-                            flush=True,
-                        )
-                        followup_decision = self._coerce_controller_decision(
-                            followup_payload, followup_progress
-                        )
-                        self._apply_controller_scores(
-                            sid, state, state.index, followup_decision
-                        )
-                        followup_text = (
-                            (followup_decision.next_utterance or "")
-                            if followup_decision
-                            else ""
-                        ).strip()
-                        if not followup_text:
-                            extracted_followup = self._extract_controller_question(
-                                followup_payload
-                            )
-                            followup_text = (extracted_followup or "").strip()
-                        if followup_text:
-                            controller_text = followup_text
-                            decision_payload = followup_payload
-                            if followup_decision:
-                                decision = followup_decision
-                            state.valid_ds = True
-                        else:
-                            if state.valid_ds:
-                                print(
-                                    "🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。",
-                                    flush=True,
-                                )
-                            else:
-                                print(
-                                    "⚠️ 触发 fallback（DeepSeek 输出无效）。",
-                                    flush=True,
-                                )
-                            controller_text = pick_primary(state.index)
-                    except Exception as exc:  # pragma: no cover - runtime guard
-                        print(
-                            f"⚠️ DeepSeek 生成第{state.index}题失败，回退固定题库: {exc}",
-                            flush=True,
-                        )
-                        controller_text = pick_primary(state.index)
-                    decision_action = "ask"
-            else:
-                state.clarify += 1
-                print(
-                    f"🗣️ DeepSeek 要求继续澄清，第 {state.clarify} 次。",
-                    flush=True,
-                )
+            print(
+                f"🗣️ DeepSeek 要求继续澄清，第 {state.clarify_count} 次。",
+                flush=True,
+            )
 
         if state.analysis:
             extra: Dict[str, Any] = {"analysis": state.analysis}
@@ -763,6 +694,8 @@ class LangGraphMini:
                     )
             except Exception:  # pragma: no cover - runtime guard
                 LOGGER.exception("Failed to persist clarify target for %s", sid)
+            state.prev_ask = {"item_id": clarify_target_id or item_id, "text": clarify_text}
+            state.waiting_for_user = True
             self._append_turn(
                 sid,
                 state,
@@ -780,33 +713,21 @@ class LangGraphMini:
                 record=False,
             )
 
-        if ask_target_override is not None:
-            ask_target_int = ask_target_override
-        else:
-            ask_target = decision.current_item_id or get_next_item(item_id)
-            try:
-                ask_target_int = int(ask_target)
-            except (TypeError, ValueError):
-                ask_target_int = item_id
-            if ask_target_int <= item_id:
-                ask_target_int = get_next_item(item_id)
+        ask_target = decision.current_item_id or get_next_item(item_id)
+        try:
+            ask_target_int = int(ask_target)
+        except (TypeError, ValueError):
+            ask_target_int = item_id
+        if ask_target_int <= item_id and not state.waiting_for_user:
+            ask_target_int = get_next_item(item_id)
 
         if decision_action == "ask":
             if ask_target_int in (None, -1):
                 decision_action = "finish"
+            elif ask_target_int == item_id:
+                print("🔁 重复发送当前题主问。", flush=True)
             else:
-                if ask_target_override is None:
-                    self._advance_to(sid, ask_target_int, state)
-                else:
-                    state.index = ask_target_int
-                    state.clarify = 0
-                    try:
-                        self.repo.clear_last_clarify_need(state.sid)
-                    except Exception:  # pragma: no cover - runtime guard
-                        LOGGER.exception(
-                            "Failed to clear clarify target for %s", state.sid
-                        )
-                    self._persist_state(state)
+                self._advance_to(sid, ask_target_int, state)
                 print(
                     f"📈 DeepSeek 决策推进至第 {state.index} 题。",
                     flush=True,
@@ -825,6 +746,8 @@ class LangGraphMini:
                     controller_text = pick_primary(state.index)
 
         if decision_action == "ask":
+            state.prev_ask = {"item_id": state.index, "text": controller_text}
+            state.waiting_for_user = True
             self._append_turn(
                 sid,
                 state,
@@ -844,7 +767,8 @@ class LangGraphMini:
 
         state.completed = True
         state.index = TOTAL_ITEMS
-        state.clarify = 0
+        state.clarify_count = 0
+        state.waiting_for_user = False
         self._persist_state(state)
         try:
             self.repo.mark_finished(sid)
@@ -925,9 +849,10 @@ class LangGraphMini:
             for seg in (transcripts[-2:] if transcripts else [])
             if seg.get("text")
         ]
+        progress_index = max(get_first_item(), min(state.index, state.total))
         payload: Dict[str, Any] = {
             "next_utterance": text,
-            "progress": {"index": min(state.index, state.total), "total": state.total},
+            "progress": {"index": progress_index, "total": state.total},
             "risk_flag": risk_flag,
             "tts_text": text,
             "tts_url": tts_url or None,
@@ -1215,7 +1140,8 @@ class LangGraphMini:
         if state is None:
             state = self._load_state(sid)
         state.index = target
-        state.clarify = 0
+        state.clarify_count = 0
+        state.waiting_for_user = False
         # 统一清理上一轮的 clarify 记录，避免遗留阻塞推进
         try:
             self.repo.clear_last_clarify_need(state.sid)
@@ -1620,11 +1546,22 @@ class LangGraphMini:
                 f"🧩 检测到刷新，自动恢复至第 {state.index} 题。",
                 flush=True,
             )
-            return {
-                "text": f"继续第 {state.index} 题：{pick_primary(state.index)}",
-                "action": "ask",
-                "index": state.index,
-            }
+            if state.waiting_for_user and (state.prev_ask.get("text") or "").strip():
+                ask_text = (state.prev_ask.get("text") or "").strip()
+                item_id = state.prev_ask.get("item_id") or state.index
+            else:
+                ask_text = pick_primary(state.index)
+                item_id = state.index
+            state.prev_ask = {"item_id": item_id, "text": ask_text}
+            state.waiting_for_user = True
+            self._persist_state(state)
+            return self._make_response(
+                sid,
+                state,
+                ask_text,
+                turn_type="ask",
+                record=False,
+            )
 
         analysis_result = self._run_ds_analysis_stream(dialogue)
         extra_payload: Dict[str, Any] = {}
@@ -1665,14 +1602,16 @@ class LangGraphMini:
             except Exception:  # pragma: no cover - runtime guard
                 LOGGER.exception("Failed to clear clarify target for %s", sid)
 
-        if clarify_prompt and state.clarify < 2:
+        if clarify_prompt and state.clarify_count < MAX_CLARIFY_PER_ITEM:
             try:
                 self.repo.set_last_clarify_need(
                     sid, clarify_item_id or item_id, clarify_prompt
                 )
             except Exception:  # pragma: no cover - runtime guard
                 LOGGER.exception("Failed to persist clarify target for %s", sid)
-            state.clarify += 1
+            state.clarify_count += 1
+            state.prev_ask = {"item_id": clarify_item_id or item_id, "text": clarify_prompt}
+            state.waiting_for_user = True
             self._persist_state(state)
             return self._make_response(
                 sid,
@@ -1682,7 +1621,7 @@ class LangGraphMini:
                 extra=extra_payload,
             )
 
-        state.clarify = 0
+        state.clarify_count = 0
 
         next_item = get_next_item(item_id)
         if next_item != -1:
@@ -1690,6 +1629,12 @@ class LangGraphMini:
             next_question = self._generate_primary_question(
                 sid, state, next_item, transcripts, dialogue
             )
+            normalized_question = (next_question or "").strip()
+            if normalized_question:
+                state.asked_questions.add(normalized_question)
+                state.asked_items.add(state.index)
+            state.prev_ask = {"item_id": state.index, "text": next_question}
+            state.waiting_for_user = True
             return self._make_response(
                 sid,
                 state,
@@ -1700,6 +1645,7 @@ class LangGraphMini:
 
         state.completed = True
         state.index = TOTAL_ITEMS
+        state.waiting_for_user = False
         self._persist_state(state)
         summary_payload = self._finalize_scores(
             sid, state, transcripts, extra=extra_payload
@@ -1732,7 +1678,12 @@ class LangGraphMini:
         state = SessionState(sid=sid)
         state.index = int(raw.get("index", state.index))
         state.total = int(raw.get("total", state.total)) or TOTAL_ITEMS
-        state.clarify = int(raw.get("clarify", state.clarify))
+        clarify_seed = raw.get("clarify_count", raw.get("clarify"))
+        if clarify_seed is not None:
+            try:
+                state.clarify_count = int(clarify_seed)
+            except (TypeError, ValueError):
+                state.clarify_count = state.clarify_count
         state.completed = bool(raw.get("completed", state.completed))
         state.last_utt_index = int(raw.get("last_utt_index", state.last_utt_index))
         state.opinion = raw.get("opinion", state.opinion)
@@ -1746,6 +1697,11 @@ class LangGraphMini:
         state.controller_unusable_turn = (
             int(controller_turn) if controller_turn is not None else None
         )
+        prev_payload = raw.get("prev_ask")
+        if isinstance(prev_payload, dict):
+            item_id = try_int(prev_payload.get("item_id"))
+            state.prev_ask = {"item_id": item_id, "text": prev_payload.get("text")}
+        state.waiting_for_user = bool(raw.get("waiting_for_user", state.waiting_for_user))
         if "risk_hold" in raw:
             setattr(state, "risk_hold", bool(raw.get("risk_hold")))
         elif not hasattr(state, "risk_hold"):
@@ -1758,7 +1714,7 @@ class LangGraphMini:
             {
                 "index": state.index,
                 "total": state.total,
-                "clarify": state.clarify,
+                "clarify_count": state.clarify_count,
                 "scores_acc": state.scores_acc,
                 "completed": state.completed,
                 "last_utt_index": state.last_utt_index,
@@ -1768,6 +1724,8 @@ class LangGraphMini:
                 "controller_notice_logged": state.controller_notice_logged,
                 "controller_unusable_turn": state.controller_unusable_turn,
                 "risk_hold": getattr(state, "risk_hold", False),
+                "prev_ask": state.prev_ask,
+                "waiting_for_user": state.waiting_for_user,
             },
         )
 
@@ -1905,6 +1863,12 @@ class LangGraphMini:
             return result
         except DeepSeekTemporarilyUnavailableError as exc:
             LOGGER.debug("DeepSeek analysis temporarily unavailable: %s", exc)
+            return None
+        except JSONDecodeError as exc:
+            LOGGER.warning(
+                "DeepSeek analysis JSON failed; falling back to plain ask flow: %s",
+                exc,
+            )
             return None
         except Exception as exc:  # pragma: no cover - runtime guard
             LOGGER.warning("DeepSeek analysis skipped: %s", exc)
