@@ -512,19 +512,20 @@ class LangGraphMini:
                 or "ask"
             ).strip().lower()
 
-            # 强制顺序模式：题号对齐当前 index / 顺序推进
-            target_idx = current_idx
-            if action == "ask":
-                if state.waiting_for_user:
-                    target_idx = current_idx
-                else:
-                    next_idx = get_next_item(current_idx)
-                    if next_idx in (None, -1):
-                        action = "finish"
-                        target_idx = current_idx
-                    else:
-                        target_idx = next_idx
-            item_id = target_idx
+            if decision and hasattr(decision, "current_item_id") and decision.current_item_id is not None:
+                target_idx = decision.current_item_id
+                item_id = target_idx
+            else:
+                target_idx = current_idx
+                item_id = target_idx
+
+            print(
+                "🎯 最终题号决策: 控制器建议=", getattr(decision, "current_item_id", "无"),
+                ", 实际使用=", item_id,
+                sep="",
+                flush=True,
+            )
+
 
             if decision:
                 decision.action = action or "ask"
