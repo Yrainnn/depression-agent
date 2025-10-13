@@ -729,25 +729,18 @@ class LangGraphMini:
         if decision_action == "ask":
             if ask_target_int in (None, -1):
                 decision_action = "finish"
-            elif ask_target_int == item_id:
-                print("🔁 重复发送当前题主问。", flush=True)
             else:
-                self._advance_to(sid, ask_target_int, state)
-                print(
-                    f"📈 DeepSeek 决策推进至第 {state.index} 题。",
-                    flush=True,
-                )
+                # 直接信任控制器的题号决策
+                if ask_target_int != state.index:
+                    # 题号变化，正常推进
+                    self._advance_to(sid, ask_target_int, state)
+                    print(f"📈 推进至第 {state.index} 题。", flush=True)
+                else:
+                    # 题号相同，但这不是重复发送 - 可能是澄清后的继续或正常流程
+                    print("🔄 继续当前题目流程。", flush=True)
+                    
+                # 只有在没有控制器文本时才生成问题
                 if not controller_text:
-                    if state.valid_ds:
-                        print(
-                            "🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            "⚠️ 触发 fallback（DeepSeek 输出无效）。",
-                            flush=True,
-                        )
                     controller_text = pick_primary(state.index)
 
         if decision_action == "ask":
