@@ -714,13 +714,12 @@ class LangGraphMini:
                 record=False,
             )
 
-        ask_target = decision.current_item_id or get_next_item(item_id)
-        try:
-            ask_target_int = int(ask_target)
-        except (TypeError, ValueError):
-            ask_target_int = item_id
-        if ask_target_int <= item_id and not state.waiting_for_user:
+        if decision and hasattr(decision, 'current_item_id') and decision.current_item_id is not None:
+            ask_target_int = decision.current_item_id
+        else:
             ask_target_int = get_next_item(item_id)
+
+        print(f"🎯 最终推进决策: 控制器建议={getattr(decision, 'current_item_id', '无')}, 实际推进到={ask_target_int}", flush=True)
 
         if decision_action == "ask":
             if ask_target_int in (None, -1):
