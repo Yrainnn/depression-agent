@@ -304,54 +304,11 @@ class LangGraphMini:
             )
             data["clarify_target"] = {"item_id": item_id, "clarify_need": clarify_prompt}
 
-        raw_item_id = data.get("current_item_id")
-        if raw_item_id is not None:
-            try:
-                data["current_item_id"] = int(raw_item_id)
-            except (TypeError, ValueError):
-                LOGGER.debug("Invalid current_item_id from controller: %s", raw_item_id)
         try:
             return ControllerDecision.model_validate(data)
         except Exception as exc:
             LOGGER.debug("Failed to normalise controller decision: %s", exc)
             return None
-
-    @staticmethod
-    def _decision_payload_is_valid(payload: Optional[Dict[str, Any]]) -> bool:
-        if not payload or not isinstance(payload, dict):
-            return False
-        action = (
-            payload.get("action")
-            or payload.get("decision")
-            or payload.get("type")
-            or ""
-        )
-        text = (
-            payload.get("next_utterance")
-            or payload.get("question")
-            or ""
-        )
-        return bool(str(action).strip() and str(text).strip())
-
-    @staticmethod
-    def _decision_is_valid(decision: Optional[ControllerDecision]) -> bool:
-        """Loosen DeepSeek decision validation to allow string item IDs."""
-        if decision is None:
-            return False
-        action = (getattr(decision, "action", "") or "").strip().lower()
-        if action not in {"ask", "clarify", "finish"}:
-            return False
-        next_utt = getattr(decision, "next_utterance", "")
-        if action != "finish" and (
-            not isinstance(next_utt, str) or not next_utt.strip()
-        ):
-            return False
-        raw_id = getattr(decision, "current_item_id", None)
-        try:
-            int(raw_id)
-        except (TypeError, ValueError):
-            return False
-        return True
 
     def step(
         self,
@@ -434,20 +391,6 @@ class LangGraphMini:
 
         dialogue_payload = self._build_dialogue_payload(sid, transcripts)
 
-        if asked_primary and not dialogue_payload:
-            resume_index = self._current_item_id(state)
-            print(
-                f"🧩 检测到刷新，自动恢复至第 {resume_index} 题。",
-                flush=True,
-            )
-            resume_text = f"继续第 {resume_index} 题：{pick_primary(resume_index)}"
-            return self._make_response(
-                sid,
-                state,
-                resume_text,
-                turn_type="ask",
-            )
-
         if not asked_primary:
             question = self._generate_primary_question(
                 sid,
@@ -528,180 +471,10 @@ class LangGraphMini:
                 prompt=get_prompt_hamd17_controller(),
             )
             print(f"🤖 DeepSeek 返回: {decision_payload}", flush=True)
+
             normalized_payload = (
                 dict(decision_payload) if isinstance(decision_payload, dict) else {}
             )
-
-            if not hasattr(state, "asked_items"):
-                state.asked_items = set()
-            if not hasattr(state, "asked_questions"):
-                state.asked_questions = set()
-            if not hasattr(state, "clarify_count"):
-                state.clarify_count = 0
-
-            action = (
-                normalized_payload.get("action")
-                or normalized_payload.get("decision")
-                or normalized_payload.get("type")
-                or ""
-            ).lower()
-            ask_text = (
-                normalized_payload.get("next_utterance")
-                or normalized_payload.get("question")
-                or ""
-            ).strip()
-            raw_item_id = normalized_payload.get("current_item_id", item_id)
-            try:
-                current_item_id = int(raw_item_id)
-            except (TypeError, ValueError):
-                current_item_id = item_id
-            if current_item_id <= 0:
-                current_item_id = item_id
-            normalized_payload["current_item_id"] = current_item_id
-
-            if action == "clarify":
-                state.clarify_count += 1
-                if state.clarify_count > 2:
-                    print("⚠️ 澄清次数超限，自动推进下一题。", flush=True)
-                    state.clarify_count = 0
-                    next_item = get_next_item(current_item_id)
-                    if next_item == -1:
-                        next_item = current_item_id
-                    state.index = max(get_first_item(), min(next_item, TOTAL_ITEMS))
-                    current_item_id = state.index
-                    ask_text = pick_primary(current_item_id)
-                    action = "ask"
-                    normalized_payload.update(
-                        {
-                            "action": action,
-                            "decision": action,
-                            "next_utterance": ask_text,
-                            "question": ask_text,
-                            "current_item_id": current_item_id,
-                        }
-                    )
-                    state.asked_items.add(current_item_id)
-                    state.asked_questions.add(ask_text)
-                else:
-                    normalized_payload["action"] = "clarify"
-                    normalized_payload.setdefault("decision", "clarify")
-                    if ask_text:
-                        state.asked_questions.add(ask_text)
-            else:
-                if not action:
-                    action = "ask"
-                normalized_payload["action"] = action
-                normalized_payload.setdefault("decision", action)
-                state.clarify_count = 0
-
-                if current_item_id in state.asked_items:
-                    print(
-                        f"⚠️ 条目 {current_item_id} 已问过，跳过重复。",
-                        flush=True,
-                    )
-                    next_item = get_next_item(current_item_id)
-                    if next_item == -1:
-                        next_item = current_item_id
-                    state.index = max(get_first_item(), min(next_item, TOTAL_ITEMS))
-                    current_item_id = state.index
-                    ask_text = pick_primary(current_item_id)
-                    normalized_payload.update(
-                        {
-                            "action": "ask",
-                            "decision": "ask",
-                            "next_utterance": ask_text,
-                            "question": ask_text,
-                            "current_item_id": current_item_id,
-                        }
-                    )
-                    state.asked_items.add(current_item_id)
-                else:
-                    state.asked_items.add(current_item_id)
-
-                if not ask_text:
-                    ask_text = pick_primary(current_item_id)
-                    normalized_payload["next_utterance"] = ask_text
-                    normalized_payload.setdefault("question", ask_text)
-
-                if ask_text in state.asked_questions:
-                    print(
-                        f"⚠️ 检测到重复问句：{ask_text}，自动跳过。",
-                        flush=True,
-                    )
-                    next_item = get_next_item(current_item_id)
-                    if next_item == -1:
-                        next_item = current_item_id
-                    state.index = max(get_first_item(), min(next_item, TOTAL_ITEMS))
-                    current_item_id = state.index
-                    ask_text = pick_primary(current_item_id)
-                    normalized_payload.update(
-                        {
-                            "action": "ask",
-                            "decision": "ask",
-                            "next_utterance": ask_text,
-                            "question": ask_text,
-                            "current_item_id": current_item_id,
-                        }
-                    )
-                    state.asked_items.add(current_item_id)
-                state.asked_questions.add(ask_text)
-
-            prev_index = state.index
-            original_item_id = current_item_id
-            original_question = ask_text
-            current_item_id = max(get_first_item(), min(current_item_id, TOTAL_ITEMS))
-            if current_item_id > prev_index + 1:
-                print(
-                    f"⚠️ DeepSeek 返回 item_id={original_item_id} 与 index={prev_index} 差距异常，保持当前。",
-                    flush=True,
-                )
-                current_item_id = prev_index
-                normalized_payload["current_item_id"] = current_item_id
-                ask_text = pick_primary(current_item_id)
-                normalized_payload["next_utterance"] = ask_text
-                normalized_payload["question"] = ask_text
-                if original_question:
-                    state.asked_questions.discard(original_question)
-                state.asked_questions.add(ask_text)
-                if original_item_id != current_item_id:
-                    state.asked_items.discard(original_item_id)
-                state.asked_items.add(current_item_id)
-            elif current_item_id > prev_index:
-                print(
-                    f"📈 DeepSeek 推进至第 {current_item_id} 题。",
-                    flush=True,
-                )
-                state.asked_items.add(current_item_id)
-            else:
-                print(
-                    f"🧩 保持当前题号 {prev_index}（DeepSeek 未推进）。",
-                    flush=True,
-                )
-                current_item_id = prev_index
-                normalized_payload["current_item_id"] = current_item_id
-                if original_item_id != current_item_id:
-                    state.asked_items.discard(original_item_id)
-                state.asked_items.add(current_item_id)
-            state.index = current_item_id
-            ask_text = (normalized_payload.get("next_utterance") or "").strip()
-            normalized_payload.setdefault("question", ask_text)
-
-            state.valid_ds = self._decision_payload_is_valid(normalized_payload)
-            if not state.valid_ds:
-                print("⚠️ DeepSeek 输出异常，触发 fallback。", flush=True)
-                fallback_index = self._current_item_id(state)
-                ask_text = pick_primary(fallback_index)
-                normalized_payload = {
-                    "action": "ask",
-                    "decision": "ask",
-                    "next_utterance": ask_text,
-                    "question": ask_text,
-                    "current_item_id": fallback_index,
-                }
-                state.index = fallback_index
-                state.asked_items.add(fallback_index)
-                state.asked_questions.add(ask_text)
-                state.valid_ds = True
 
             decision = self._coerce_controller_decision(
                 normalized_payload, current_progress
@@ -833,23 +606,20 @@ class LangGraphMini:
                 user_text=user_text,
             )
 
-        decision_valid = self._decision_is_valid(decision)
-        if not decision_valid:
-            if decision and getattr(decision, "next_utterance", None):
-                print("🧩 跳过 fallback（DeepSeek 输出可用）。", flush=True)
+        if not decision or not state.valid_ds:
+            if state.valid_ds:
+                print("🧩 跳过重复 fallback（已确认 DeepSeek 输出有效）。", flush=True)
             else:
-                print("⚠️ DeepSeek 决策无效，启用 fallback 流程。", flush=True)
-                return self._fallback_flow(
-                    sid=sid,
-                    state=state,
-                    item_id=item_id,
-                    scoring_segments=scoring_segments,
-                    dialogue=dialogue_payload,
-                    transcripts=transcripts,
-                    user_text=user_text,
-                )
-        else:
-            state.valid_ds = True
+                print("⚠️ DeepSeek 输出异常，启用 fallback 流程。", flush=True)
+            return self._fallback_flow(
+                sid=sid,
+                state=state,
+                item_id=item_id,
+                scoring_segments=scoring_segments,
+                dialogue=dialogue_payload,
+                transcripts=transcripts,
+                user_text=user_text,
+            )
 
         if state.controller_unusable_turn is not None:
             state.controller_unusable_turn = None
@@ -1976,21 +1746,6 @@ class LangGraphMini:
         state.controller_unusable_turn = (
             int(controller_turn) if controller_turn is not None else None
         )
-        asked_items_raw = raw.get("asked_items") or []
-        asked_items_set = set()
-        for value in asked_items_raw:
-            try:
-                asked_items_set.add(int(value))
-            except (TypeError, ValueError):
-                continue
-        state.asked_items = asked_items_set
-        asked_questions_raw = raw.get("asked_questions") or []
-        state.asked_questions = {
-            str(question)
-            for question in asked_questions_raw
-            if str(question).strip()
-        }
-        state.clarify_count = int(raw.get("clarify_count", 0) or 0)
         if "risk_hold" in raw:
             setattr(state, "risk_hold", bool(raw.get("risk_hold")))
         elif not hasattr(state, "risk_hold"):
@@ -2013,21 +1768,6 @@ class LangGraphMini:
                 "controller_notice_logged": state.controller_notice_logged,
                 "controller_unusable_turn": state.controller_unusable_turn,
                 "risk_hold": getattr(state, "risk_hold", False),
-                "clarify_count": getattr(state, "clarify_count", 0),
-                "asked_items": sorted(
-                    {
-                        int(item)
-                        for item in getattr(state, "asked_items", set())
-                        if isinstance(item, int)
-                    }
-                ),
-                "asked_questions": sorted(
-                    {
-                        str(question)
-                        for question in getattr(state, "asked_questions", set())
-                        if str(question).strip()
-                    }
-                ),
             },
         )
 
