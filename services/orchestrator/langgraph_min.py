@@ -454,6 +454,55 @@ class LangGraphMini:
             )
             print(f"🤖 DeepSeek 返回: {decision_payload}", flush=True)
 
+            # === 新增：初始化防重复集合 ===
+            if not hasattr(state, "asked_questions"):
+                state.asked_questions = set()
+            if not hasattr(state, "asked_items"):
+                state.asked_items = set()
+
+            # === 新增：同步 item_id ===
+            if isinstance(decision_payload, dict):
+                current_item_id = decision_payload.get("current_item_id")
+                if isinstance(current_item_id, int):
+                    if current_item_id > state.index:
+                        state.index = current_item_id
+                else:
+                    current_item_id = state.index
+            else:
+                current_item_id = state.index
+
+            # === 新增：问句去重机制 ===
+            ask_text_clean = (
+                (decision_payload.get("next_utterance") or "").strip()
+                if isinstance(decision_payload, dict)
+                else ""
+            )
+            if ask_text_clean in state.asked_questions:
+                print(
+                    f"⚠️ 检测到重复问句：{ask_text_clean}，自动跳过。",
+                    flush=True,
+                )
+                state.index += 1
+                ask_text_clean = pick_primary(state.index)
+                if isinstance(decision_payload, dict):
+                    decision_payload["next_utterance"] = ask_text_clean
+                state.asked_questions.add(ask_text_clean)
+            else:
+                state.asked_questions.add(ask_text_clean)
+
+            # === 新增：item_id 去重 ===
+            if current_item_id in state.asked_items:
+                print(
+                    f"⚠️ item_id {current_item_id} 已问过，跳过重复。",
+                    flush=True,
+                )
+                state.index += 1
+                if isinstance(decision_payload, dict):
+                    decision_payload["next_utterance"] = pick_primary(state.index)
+                state.asked_items.add(state.index)
+            else:
+                state.asked_items.add(current_item_id)
+
             # 🧠 统一字段兼容读取
             if isinstance(decision_payload, dict):
                 decision_action = (
