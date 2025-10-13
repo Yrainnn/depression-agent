@@ -262,6 +262,19 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
     rationale = opinion.get("rationale") if isinstance(opinion, dict) else ""
 
     total_score = _compute_total_score(expanded_scores, score_json)
+    # === 新增诊断逻辑 ===
+    if total_score <= 7:
+        diagnosis = "无抑郁症状"
+        advice = "情绪状态良好，无明显抑郁表现。建议保持规律作息与积极生活方式。"
+    elif total_score <= 16:
+        diagnosis = "轻度抑郁"
+        advice = "出现轻度情绪低落，建议适度休息、增加社交活动，并考虑心理疏导。"
+    elif total_score <= 23:
+        diagnosis = "中度抑郁"
+        advice = "表现出明显抑郁特征，建议及时寻求心理咨询或医生指导。"
+    else:
+        diagnosis = "重度抑郁"
+        advice = "存在严重抑郁表现，建议尽快就医，进行专业评估与治疗。"
     risk_events = _prepare_risk_events(repo, sid)
     has_scores = any(isinstance(item.get("score"), (int, float)) for item in expanded_scores)
 
@@ -276,6 +289,8 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         "expanded_scores": expanded_scores,
         "risk_events": risk_events,
         "has_scores": has_scores,
+        "diagnosis": diagnosis,
+        "advice": advice,
     }
 
     base_styles = """
@@ -314,6 +329,11 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         <div class=\"section\">
             <h2>总分</h2>
             <div class=\"score-total\">{{ total_score }} / {{ max_total }}</div>
+        </div>
+        <div class=\"section\">
+            <h2>诊断结果</h2>
+            <p><strong>抑郁程度：</strong>{{ diagnosis }}</p>
+            <p><strong>诊断意见：</strong>{{ advice }}</p>
         </div>
         <div class=\"section\">
             <h2>分项明细</h2>
