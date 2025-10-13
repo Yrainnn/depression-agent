@@ -717,9 +717,11 @@ class LangGraphMini:
         if decision and hasattr(decision, 'current_item_id') and decision.current_item_id is not None:
             ask_target_int = decision.current_item_id
             item_id = target_idx
+            state.index = item_id
         else:
             ask_target_int = get_next_item(item_id)
             item_id = target_idx
+            state.index = item_id
 
         state.index = item_id
         print(f"🎯 最终推进决策: 控制器建议={getattr(decision, 'current_item_id', '无')}, 实际推进到={ask_target_int}", flush=True)
