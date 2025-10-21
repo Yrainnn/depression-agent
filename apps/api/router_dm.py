@@ -51,6 +51,8 @@ class StepResponse(BaseModel):
     risk_flag: bool
     tts_text: Optional[str] = None
     tts_url: Optional[str] = None
+    video_url: Optional[str] = None
+    media_type: Optional[str] = None
     segments_previews: Optional[List[str]] = None
 
     class Config:
