@@ -80,7 +80,7 @@ def user_step(
     text_payload = message.strip() or None
     risk_text = "无紧急风险提示。"
     progress: Dict[str, Any] = {}
-    audio_value: Optional[str] = None
+    media_value: Optional[str] = None
 
     try:
         result = _call_dm_step(session_id, text=text_payload, audio_ref=None)
@@ -95,14 +95,7 @@ def user_step(
 
     assistant_reply = result.get("next_utterance", "")
     previews = result.get("segments_previews") or []
-    tts_url = result.get("tts_url")
-    if tts_url:
-        if tts_url.startswith("file://"):
-            local_path = tts_url[7:]
-            if Path(local_path).exists():
-                audio_value = local_path
-        else:
-            audio_value = tts_url
+    media_value = _extract_media_value(session_id, result)
 
     if previews:
         recent_previews = previews[-2:]
@@ -121,7 +114,7 @@ def user_step(
         "⚠️ 检测到高风险，请立即寻求紧急帮助。" if risk_flag else "无紧急风险提示。"
     )
 
-    return history, risk_text, progress, session_id, audio_value
+    return history, risk_text, progress, session_id, media_value
 
 
 def initialize_conversation(
@@ -133,7 +126,6 @@ def initialize_conversation(
     history: List[Tuple[Optional[str], str]] = []
     risk_text = "无紧急风险提示。"
     progress: Dict[str, Any] = {}
-    audio_value: Optional[str] = None
 
     try:
         result = _call_dm_step(sid)
@@ -152,12 +144,8 @@ def initialize_conversation(
         "⚠️ 检测到高风险，请立即寻求紧急帮助。" if risk_flag else "无紧急风险提示。"
     )
 
-    tts_url = result.get("tts_url")
-    if tts_url:
-        audio_value = tts_url
-
-    audio_value = _ensure_audio_playable_url(sid, audio_value)
-    return history, sid, risk_text, progress, audio_value
+    media_value = _extract_media_value(sid, result)
+    return history, sid, risk_text, progress, media_value
 
 
 @dataclass(slots=True)
@@ -659,6 +647,21 @@ def _ensure_audio_playable_url(session_id: str, audio_value: Optional[str]) -> O
     return local_path
 
 
+def _extract_media_value(session_id: str, result: Dict[str, Any]) -> Optional[str]:
+    """从对话结果中提取可用于播放的媒体 URL。"""
+    if not result:
+        return None
+
+    media_type = (result.get("media_type") or "").lower()
+    if media_type == "video":
+        return result.get("video_url")
+
+    if media_type == "audio":
+        return _ensure_audio_playable_url(session_id, result.get("tts_url"))
+
+    return None
+
+
 # 创建全局事件循环和任务管理
 _event_loop = None
 _background_tasks = set()
@@ -1040,8 +1043,8 @@ def build_ui() -> gr.Blocks:
                             """
                         )
                         
-                        audio_sys = gr.Audio(
-                            label="系统语音反馈",
+                        video_sys = gr.Video(
+                            label="系统视频反馈",
                             interactive=False,
                             autoplay=True
                         )
@@ -1174,11 +1177,10 @@ def build_ui() -> gr.Blocks:
             float,
             Optional[str],
         ]:
-            chat, risk_text, progress, sid, audio_value = user_step(
+            chat, risk_text, progress, sid, media_value = user_step(
                 message, history, session_id
             )
-            playable_audio = _ensure_audio_playable_url(sid, audio_value)
-            
+
             # 处理进度显示 - 修复版本
             progress_value = _get_progress_value(progress)
             progress_label = _get_progress_label(progress)
@@ -1200,7 +1202,7 @@ def build_ui() -> gr.Blocks:
                 </div>
                 """
             
-            return chat, "", sid, risk_display, progress_value, playable_audio
+            return chat, "", sid, risk_display, progress_value, media_value
 
         text_input.submit(
             _on_submit,
@@ -1211,7 +1213,7 @@ def build_ui() -> gr.Blocks:
                 session_state,
                 risk_alert,
                 progress_bar,
-                audio_sys,
+                video_sys,
             ],
         )
 
@@ -1224,7 +1226,7 @@ def build_ui() -> gr.Blocks:
                 session_state,
                 risk_alert,
                 progress_bar,
-                audio_sys,
+                video_sys,
             ],
         )
 
@@ -1239,7 +1241,7 @@ def build_ui() -> gr.Blocks:
 
         clear_chat_btn.click(
             fn=clear_chat,
-            outputs=[chatbot, session_state, risk_alert, progress_bar, audio_sys]
+            outputs=[chatbot, session_state, risk_alert, progress_bar, video_sys]
         )
 
         # 实时语音识别控制
@@ -1301,7 +1303,7 @@ def build_ui() -> gr.Blocks:
                 """, 0.0, session_id, None, latest, all_sents
             
             # 提交句子进行问答
-            updated_history, risk_text, progress, updated_session, audio_value = user_step(
+            updated_history, risk_text, progress, updated_session, media_value = user_step(
                 current_sentence, history, session_id
             )
             
@@ -1325,7 +1327,7 @@ def build_ui() -> gr.Blocks:
             # 获取更新后的句子状态
             latest, all_sents = get_current_sentences()
             
-            return updated_history, risk_display, progress_value, updated_session, audio_value, latest, all_sents
+            return updated_history, risk_display, progress_value, updated_session, media_value, latest, all_sents
 
         submit_sentence_btn.click(
             fn=submit_current_sentence_sync,
@@ -1335,7 +1337,7 @@ def build_ui() -> gr.Blocks:
                 risk_alert,
                 progress_bar,
                 session_state,
-                audio_sys,
+                video_sys,
                 latest_sentence,
                 all_sentences,
             ]
@@ -1349,7 +1351,7 @@ def build_ui() -> gr.Blocks:
 
         # 初始化对话
         def initialize_with_progress(session_id: str):
-            history, sid, risk_text, progress, audio_value = initialize_conversation(session_id)
+            history, sid, risk_text, progress, media_value = initialize_conversation(session_id)
             
             # 处理进度显示
             progress_value = _get_progress_value(progress)
@@ -1368,12 +1370,12 @@ def build_ui() -> gr.Blocks:
                 </div>
                 """
             
-            return history, sid, risk_display, progress_value, audio_value
+            return history, sid, risk_display, progress_value, media_value
 
         demo.load(
             fn=initialize_with_progress,
             inputs=[session_state],
-            outputs=[chatbot, session_state, risk_alert, progress_bar, audio_sys],
+            outputs=[chatbot, session_state, risk_alert, progress_bar, video_sys],
         )
 
         # 添加轮询组件

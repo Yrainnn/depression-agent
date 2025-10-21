@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from time import monotonic
@@ -25,6 +26,7 @@ from services.llm.prompts import (
     get_prompt_diagnosis,
     get_prompt_mdd_judgment,
 )
+from services.digital_human.service import generate_digital_human_video
 from services.orchestrator.questions_hamd17 import (
     MAX_SCORE,
     get_first_item,
@@ -1012,6 +1014,7 @@ class LangGraphMini:
             self._record_assistant_turn(sid, state, text, turn_type)
         transcripts = self.repo.get_transcripts(sid)
         tts_url = self._make_tts(sid, text)
+        media_payload = self._prepare_media_payload(sid, text, tts_url)
         previews = [
             seg.get("text")
             for seg in (transcripts[-2:] if transcripts else [])
@@ -1023,8 +1026,8 @@ class LangGraphMini:
             "progress": {"index": progress_index, "total": state.total},
             "risk_flag": risk_flag,
             "tts_text": text,
-            "tts_url": tts_url or None,
         }
+        payload.update(media_payload)
         if previews:
             payload["segments_previews"] = previews
         payload["risk"] = payload.get("risk", None)
@@ -1877,6 +1880,47 @@ class LangGraphMini:
         except Exception:
             LOGGER.exception("TTS synthesis failed for %s", sid)
             return ""
+
+    def _prepare_media_payload(
+        self, sid: str, text: str, tts_url: str
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"tts_url": tts_url or None}
+
+        audio_path_value = getattr(self.tts, "last_local_path", None)
+        audio_path = Path(audio_path_value) if audio_path_value else None
+
+        if audio_path and audio_path.exists():
+            try:
+                video_url = generate_digital_human_video(sid, str(audio_path))
+            except Exception:
+                LOGGER.exception("Digital human generation failed for %s", sid)
+            else:
+                if video_url:
+                    payload["video_url"] = video_url
+                    payload["media_type"] = "video"
+                    if not payload.get("tts_url") and audio_path_value:
+                        payload["tts_url"] = f"file://{audio_path.resolve()}"
+                    try:
+                        self.repo.save_oss_reference(
+                            sid,
+                            {
+                                "type": "digital_human_video",
+                                "url": video_url,
+                                "local_audio_path": str(audio_path),
+                                "text": text,
+                            },
+                        )
+                    except Exception:  # pragma: no cover - repository guard
+                        LOGGER.exception(
+                            "Failed to persist digital human reference for %s", sid
+                        )
+                    return payload
+
+        if tts_url:
+            payload["media_type"] = "audio"
+        else:
+            payload["media_type"] = "text"
+        return payload
 
     def _load_state(self, sid: str) -> SessionState:
         raw = self.repo.load_session_state(sid) or {}

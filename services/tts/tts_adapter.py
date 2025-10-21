@@ -58,6 +58,9 @@ class TTSAdapter:
 
         self.oss_client = oss_client or default_oss_client
 
+        self.last_upload: Optional[Dict[str, Any]] = None
+        self.last_local_path: Optional[str] = None
+
         if synthesizer_factory is not None:
             self._synthesizer_factory = synthesizer_factory
         elif _SPEECH_SYNTHESIZER_CLS and self.api_key:
@@ -124,6 +127,9 @@ class TTSAdapter:
         session_dir = self.out_dir / sid
         session_dir.mkdir(parents=True, exist_ok=True)
 
+        self.last_upload = None
+        self.last_local_path = None
+
         if text:
             text = text.strip()
 
@@ -150,6 +156,7 @@ class TTSAdapter:
                         )
                         target = session_dir / filename
                         target.write_bytes(audio_bytes)
+                        self.last_local_path = str(target)
                         LOGGER.info(
                             "[TTS:dashscope] synthesized audio",
                             extra={
@@ -176,6 +183,7 @@ class TTSAdapter:
         filename = f"{sid}-{timestamp}-{uuid.uuid4().hex}.wav"
         target = session_dir / filename
         self._write_silence_wav(target, seconds=1.0)
+        self.last_local_path = str(target)
         LOGGER.info(
             "[TTS:stub] synthesized placeholder wav",
             extra={"sid": sid, "path": str(target), "voice": voice, "text": text[:80] if text else ""},
@@ -190,6 +198,7 @@ class TTSAdapter:
         text: Optional[str],
         voice: Optional[str],
     ) -> str:
+        self.last_local_path = str(path)
         url = f"file://{path.resolve()}"
         oss_url = self._upload_to_oss(sid, path, text=text, voice=voice)
         return oss_url or url
@@ -216,6 +225,12 @@ class TTSAdapter:
             path,
             metadata=metadata,
         )
+        if url:
+            self.last_upload = {
+                "url": url,
+                "oss_key": Path(path).name,
+                "local_path": str(path),
+            }
         return url
 
 
