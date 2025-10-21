@@ -1013,8 +1013,8 @@ class LangGraphMini:
         if record:
             self._record_assistant_turn(sid, state, text, turn_type)
         transcripts = self.repo.get_transcripts(sid)
-        tts_url = self._make_tts(sid, text)
-        media_payload = self._prepare_media_payload(sid, text, tts_url)
+        audio_local = self._make_tts(sid, text)
+        media_payload = self._prepare_media_payload(sid, text, audio_local)
         previews = [
             seg.get("text")
             for seg in (transcripts[-2:] if transcripts else [])
@@ -1862,32 +1862,18 @@ class LangGraphMini:
 
     def _make_tts(self, sid: str, text: str) -> str:
         try:
-            url = self.tts.synthesize(sid, text)
-            if getattr(self.tts, "last_upload", None):
-                try:
-                    self.repo.save_oss_reference(
-                        sid,
-                        {
-                            "type": "tts",
-                            "url": self.tts.last_upload.get("url"),
-                            "oss_key": self.tts.last_upload.get("oss_key"),
-                            "text": text,
-                        },
-                    )
-                except Exception:  # pragma: no cover - repository guard
-                    LOGGER.exception("Failed to persist TTS OSS reference for %s", sid)
-            return url
+            audio_local = self.tts.synthesize(sid, text)
+            return audio_local or ""
         except Exception:
             LOGGER.exception("TTS synthesis failed for %s", sid)
             return ""
 
     def _prepare_media_payload(
-        self, sid: str, text: str, tts_url: str
+        self, sid: str, text: str, audio_local: str
     ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"tts_url": tts_url or None}
+        payload: Dict[str, Any] = {"tts_url": None}
 
-        audio_path_value = getattr(self.tts, "last_local_path", None)
-        audio_path = Path(audio_path_value) if audio_path_value else None
+        audio_path = Path(audio_local) if audio_local else None
 
         if audio_path and audio_path.exists():
             try:
@@ -1898,8 +1884,6 @@ class LangGraphMini:
                 if video_url:
                     payload["video_url"] = video_url
                     payload["media_type"] = "video"
-                    if not payload.get("tts_url") and audio_path_value:
-                        payload["tts_url"] = f"file://{audio_path.resolve()}"
                     try:
                         self.repo.save_oss_reference(
                             sid,
@@ -1916,7 +1900,8 @@ class LangGraphMini:
                         )
                     return payload
 
-        if tts_url:
+        if audio_path and audio_path.exists():
+            payload["tts_url"] = str(audio_path.resolve())
             payload["media_type"] = "audio"
         else:
             payload["media_type"] = "text"

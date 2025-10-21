@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from packages.common.config import settings
-from services.oss.client import OSSClient, oss_client as default_oss_client
 
 LOGGER = logging.getLogger(__name__)
 SR = 16000
@@ -41,7 +40,6 @@ class TTSAdapter:
         synthesizer_factory: Optional[
             Callable[[str, str, Optional[str]], Any]
         ] = None,
-        oss_client: Optional[OSSClient] = None,
     ) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -56,9 +54,6 @@ class TTSAdapter:
         ).lower()
         self.file_extension = self._normalize_extension(self.audio_format)
 
-        self.oss_client = oss_client or default_oss_client
-
-        self.last_upload: Optional[Dict[str, Any]] = None
         self.last_local_path: Optional[str] = None
 
         if synthesizer_factory is not None:
@@ -127,7 +122,6 @@ class TTSAdapter:
         session_dir = self.out_dir / sid
         session_dir.mkdir(parents=True, exist_ok=True)
 
-        self.last_upload = None
         self.last_local_path = None
 
         if text:
@@ -199,39 +193,7 @@ class TTSAdapter:
         voice: Optional[str],
     ) -> str:
         self.last_local_path = str(path)
-        url = f"file://{path.resolve()}"
-        oss_url = self._upload_to_oss(sid, path, text=text, voice=voice)
-        return oss_url or url
-
-    def _upload_to_oss(
-        self,
-        sid: str,
-        path: Path,
-        text: Optional[str] = None,
-        voice: Optional[str] = None,
-    ) -> Optional[str]:
-        client = self.oss_client
-        if client is None or not getattr(client, "enabled", False):
-            return None
-        metadata = {
-            "type": "tts",
-            "voice": voice,
-        }
-        if text:
-            metadata["text"] = text[:200]
-        url = client.store_artifact(
-            sid,
-            "tts",
-            path,
-            metadata=metadata,
-        )
-        if url:
-            self.last_upload = {
-                "url": url,
-                "oss_key": Path(path).name,
-                "local_path": str(path),
-            }
-        return url
+        return str(path.resolve())
 
 
 def synthesize(text: str, *, voice: Optional[str] = None) -> str:
