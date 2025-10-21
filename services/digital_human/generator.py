@@ -22,12 +22,19 @@ def run_pipeline(audio_path: str) -> Path:
     audio_path = Path(audio_path).resolve()
     audio_16k = ensure_16k_mono(audio_path)
 
+    # 🧹 Step0: 清理同名旧特征文件（避免 wenet 输出冲突）
+    old_feat = MODEL_ROOT / f"assets/train/{audio_16k.stem}_wenet.npy"
+    if old_feat.exists():
+        old_feat.unlink()
+    
     # Step1: 声学特征提取
     subprocess.run(["python", str(MODEL_ROOT / "wenet_infer.py"), str(audio_16k)],
                    cwd=MODEL_ROOT, check=True)
 
     # Step2: 数字人视频推理
     audio_feat = MODEL_ROOT / f"assets/train/{audio_16k.stem}_wenet.npy"
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_video = OUTPUT_DIR / f"{uuid.uuid4().hex}_silent.mp4"
 
     subprocess.run([
