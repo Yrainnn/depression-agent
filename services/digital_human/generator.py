@@ -28,7 +28,7 @@ def run_pipeline(audio_path: str) -> Path:
         old_feat.unlink()
     
     # Step1: 声学特征提取
-    subprocess.run(["python", str(MODEL_ROOT / "wenet_infer.py"), str(audio_16k)],
+    subprocess.run(["python", str(MODEL_ROOT / "data_utils" /"wenet_infer.py"), str(audio_16k)],
                    cwd=MODEL_ROOT, check=True)
 
     # Step2: 数字人视频推理
