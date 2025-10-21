@@ -30,7 +30,6 @@ from services.audio.tingwu_async_client import (
     create_realtime_task,
     stop_realtime_task,
 )
-from services.oss.client import OSSClient
 
 API_BASE = (
     os.getenv("DM_API_BASE", os.getenv("API_BASE_URL", "http://localhost:8080"))
@@ -586,8 +585,6 @@ class RealTimeTingwuClient:
 _client: Optional[RealTimeTingwuClient] = None
 _client_lock = threading.Lock()
 _complete_sentences: List[str] = []
-_oss_client = OSSClient()
-
 # 状态标志
 _transcription_active = False
 
@@ -637,14 +634,7 @@ def _ensure_audio_playable_url(session_id: str, audio_value: Optional[str]) -> O
         local_path = local_path[7:]
     if not local_path or not Path(local_path).exists():
         return audio_value
-    if _oss_client.enabled:
-        try:
-            url = _oss_client.store_artifact(session_id, "tts", local_path)
-            if url:
-                return url
-        except Exception as exc:
-            print(f"⚠️ 上传音频到OSS失败: {exc}")
-    return local_path
+    return str(Path(local_path).resolve())
 
 
 def _extract_media_value(session_id: str, result: Dict[str, Any]) -> Optional[str]:
