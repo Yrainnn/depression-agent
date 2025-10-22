@@ -3,10 +3,7 @@ from typing import Dict, List
 # 汉密尔顿抑郁量表（HAMD-17）题库示例
 HAMD17_QUESTION_BANK: Dict[int, dict] = {
     1: {
-        "primary": [
-            "过去两周，您的情绪总体如何？是否经常感到低落或想哭？",
-            "近期是否感到心情沉重、提不起精神？",
-        ],
+        "primary": ["抑郁情绪"],
         "clarify": {
             "frequency": ["这些低落的感觉一周大概有几天出现？"],
             "duration": ["每次大概会持续多久？"],
@@ -15,7 +12,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     2: {
-        "primary": ["最近是否对原本感兴趣的事情提不起劲？"],
+        "primary": ["有罪感"],
         "clarify": {
             "frequency": ["这种兴趣下降大概多久发生一次？"],
             "duration": ["每次持续多久？"],
@@ -24,7 +21,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     3: {
-        "primary": ["最近是否觉得活着没有意义，或者出现过自伤/结束生命的念头？"],
+        "primary": ["自杀倾向"],
         "clarify": {
             "frequency": ["这种想法一周内出现几次？"],
             "duration": ["每次会持续多久？"],
@@ -35,7 +32,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     4: {
-        "primary": ["最近的睡眠情况如何？有没有入睡难、易醒或早醒的问题？"],
+        "primary": ["入睡困难"],
         "clarify": {
             "frequency": ["这些睡眠问题一周内有几晚？"],
             "duration": ["持续了多长时间？"],
@@ -44,7 +41,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     5: {
-        "primary": ["过去两周有没有感到睡得过多或难以起床？"],
+        "primary": ["睡眠维持障碍"],
         "clarify": {
             "frequency": ["这种情况多久发生一次？"],
             "duration": ["一次会持续多久？"],
@@ -53,7 +50,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     6: {
-        "primary": ["最近的食欲情况怎么样？有没有明显的变化？"],
+        "primary": ["早醒"],
         "clarify": {
             "frequency": ["食欲变化多久出现一次？"],
             "duration": ["这种状态持续了多长时间？"],
@@ -62,7 +59,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     7: {
-        "primary": ["最近是否感到疲倦、精力不足？"],
+        "primary": ["工作和兴趣"],
         "clarify": {
             "frequency": ["疲倦一周大概有几天？"],
             "duration": ["每次疲倦持续多久？"],
@@ -71,7 +68,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     8: {
-        "primary": ["最近有没有注意力难以集中或思考变慢？"],
+        "primary": ["精神运动迟缓"],
         "clarify": {
             "frequency": ["注意力问题多久会出现一次？"],
             "duration": ["一次大约持续多久？"],
@@ -80,7 +77,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     9: {
-        "primary": ["最近有没有感到焦虑、紧张或容易发脾气？"],
+        "primary": ["激越"],
         "clarify": {
             "frequency": ["这种紧张感多久出现一次？"],
             "duration": ["每次持续多久？"],
@@ -89,7 +86,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     10: {
-        "primary": ["最近是否容易坐立不安或来回走动？"],
+        "primary": ["精神性焦虑"],
         "clarify": {
             "frequency": ["这种不安感多久发生？"],
             "duration": ["一次会持续多久？"],
@@ -98,7 +95,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     11: {
-        "primary": ["最近是否动作变得缓慢、反应迟钝？"],
+        "primary": ["躯体性焦虑"],
         "clarify": {
             "frequency": ["这种迟缓多久出现一次？"],
             "duration": ["每次持续多久？"],
@@ -107,7 +104,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     12: {
-        "primary": ["过去两周是否经常担心身体健康，例如生病或疼痛？"],
+        "primary": ["胃肠道"],
         "clarify": {
             "frequency": ["这种担心一周有几天？"],
             "duration": ["每次会持续多久？"],
@@ -116,7 +113,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     13: {
-        "primary": ["最近是否感到内疚或觉得自己做得不够好？"],
+        "primary": ["全身症状"],
         "clarify": {
             "frequency": ["这种感觉多久出现一次？"],
             "duration": ["每次持续多久？"],
@@ -125,7 +122,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     14: {
-        "primary": ["最近是否经常担心、紧张到身体有反应（如心慌、出汗）？"],
+        "primary": ["性症状"],
         "clarify": {
             "frequency": ["这种反应多久出现一次？"],
             "duration": ["通常持续多久？"],
@@ -134,7 +131,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     15: {
-        "primary": ["最近是否容易被惊吓或警觉性很高？"],
+        "primary": ["疑病倾向"],
         "clarify": {
             "frequency": ["这种情况多久发生一次？"],
             "duration": ["会持续多久？"],
@@ -143,7 +140,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     16: {
-        "primary": ["最近是否觉得身体沉重、行动变慢或没力气？"],
+        "primary": ["体重减轻"],
         "clarify": {
             "frequency": ["这种感受多久出现？"],
             "duration": ["每次持续多久？"],
@@ -152,7 +149,7 @@ HAMD17_QUESTION_BANK: Dict[int, dict] = {
         },
     },
     17: {
-        "primary": ["最近记忆力如何？是否容易忘事？"],
+        "primary": ["自知力"],
         "clarify": {
             "frequency": ["忘事的情况多久发生一次？"],
             "duration": ["影响持续多久？"],
