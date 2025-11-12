@@ -4,11 +4,11 @@ import json
 import os
 from typing import Dict, Optional
 
-from .langgraph_core.nodes_output import OutputNode
-from .langgraph_core.nodes_risk import RiskNode
-from .langgraph_core.nodes_score import ScoreNode
-from .langgraph_core.nodes_strategy import StrategyNode
-from .langgraph_core.patient_context import reinforce_with_context
+from .langgraph_core.context.item_context import finalize_item_context
+from .langgraph_core.context.patient_context import reinforce_patient_context
+from .langgraph_core.graphs.main_graph import GraphRuntime
+from .langgraph_core.nodes.node_output import OutputNode
+from .langgraph_core.nodes.node_score import ScoreNode
 from .langgraph_core.state_types import SessionState
 from .langgraph_core.utils import now_iso, save_snapshot, write_jsonl
 
@@ -19,32 +19,23 @@ _SNAPSHOT_DIR = os.path.join(_BASE, "state_snapshots")
 
 
 class LangGraphCoordinator:
-    """High-level orchestrator bridging the individual LangGraph nodes."""
+    """Coordinator backed by a LangGraph StateGraph runtime."""
 
-    def __init__(self, total_items: int = 17, sid: Optional[str] = None, template_dir: Optional[str] = None) -> None:
-        templates = template_dir or _CONFIG_DIR
-        self.strategy = StrategyNode(templates)
-        self.risk = RiskNode()
-        self.score = ScoreNode()
-        self.output = OutputNode()
+    def __init__(
+        self,
+        total_items: int = 17,
+        sid: Optional[str] = None,
+        template_dir: Optional[str] = None,
+    ) -> None:
         self.state = SessionState(sid=sid or now_iso(), total=total_items)
+        self.template_dir = template_dir or _CONFIG_DIR
+        self.runtime = GraphRuntime(self.template_dir)
+        self.score_node = ScoreNode("score_parallel")
+        self.output_node = OutputNode("output")
 
-    # ------------------------------------------------------------------
     def step(self, role: str, text: Optional[str] = None) -> Dict[str, object]:
-        if role not in {"agent", "user"}:
-            raise ValueError(f"unsupported role: {role}")
-
-        payload: Dict[str, object]
-        if role == "user":
-            self.state.last_role = "user"
-            risk_payload = self.risk.check(self.state, text)
-            if risk_payload:
-                payload = risk_payload
-            else:
-                payload = self.strategy.run(self.state, text)
-        else:
-            payload = self.strategy.run(self.state, None)
-
+        payload = self.runtime.invoke(self.state, role=role, text=text)
+        response = payload
         record = {
             "sid": self.state.sid,
             "role": role,
@@ -53,24 +44,22 @@ class LangGraphCoordinator:
             "state": self.state.as_dict(),
         }
         write_jsonl(_LOG_PATH, record)
-        snapshot_path = os.path.join(
-            _SNAPSHOT_DIR, self.state.sid, f"turn_{self.state.index}_{role}.json"
-        )
+        snapshot_path = os.path.join(_SNAPSHOT_DIR, self.state.sid, f"turn_{self.state.index}_{role}.json")
         save_snapshot(snapshot_path, record)
-        return self.output.make_response(self.state, payload)
+        return response
 
-    # ------------------------------------------------------------------
     def next_item(self) -> Dict[str, object]:
-        payload = self.strategy.finalize_item(self.state)
+        payload = finalize_item_context(self.state)
         current_index = self.state.index
         self.state.index += 1
         if self.state.index > self.state.total:
             self.state.completed = True
-            self.score.parallel_score(self.state)
+            self.score_node.run(self.state)
         else:
-            self.state.patient_context = reinforce_with_context(
-                self.state.patient_context, self.state.item_contexts
-            )
+            reinforce_patient_context(self.state.patient_context, self.state.item_contexts)
+            self.state.current_strategy = "S2"
+            self.state.current_template = None
+            self.state.waiting_for_user = False
 
         record = {
             "sid": self.state.sid,
@@ -80,12 +69,11 @@ class LangGraphCoordinator:
             "state": self.state.as_dict(),
         }
         write_jsonl(_LOG_PATH, record)
-        snapshot_path = os.path.join(
-            _SNAPSHOT_DIR, self.state.sid, f"turn_{current_index}_next.json"
-        )
+        snapshot_path = os.path.join(_SNAPSHOT_DIR, self.state.sid, f"turn_{current_index}_next.json")
         save_snapshot(snapshot_path, record)
         response_payload = {"event": "next_item", **payload}
-        return self.output.make_response(self.state, response_payload)
+        response = self.output_node.run(self.state, payload=response_payload)
+        return response
 
 
 if __name__ == "__main__":

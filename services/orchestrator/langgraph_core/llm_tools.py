@@ -86,7 +86,6 @@ class _DeepSeekBackend(_BaseBackend):
     def __init__(self) -> None:
         self.client = _deepseek_client
 
-    # ------------------------------------------------------------------
     def _chat_json(self, prompt: str, *, temperature: float = 0.0, max_tokens: int = 512) -> Dict[str, Any]:
         if not self.client or not getattr(self.client, "usable", lambda: False)():
             return {}
@@ -104,7 +103,6 @@ class _DeepSeekBackend(_BaseBackend):
         except Exception:
             return {}
 
-    # ------------------------------------------------------------------
     def call(self, func: str, payload: Dict[str, Any]) -> Any:
         if not self.client or not getattr(self.client, "usable", lambda: False)():
             return _FallbackBackend().call(func, payload)
