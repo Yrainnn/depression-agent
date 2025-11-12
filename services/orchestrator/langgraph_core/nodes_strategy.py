@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-from services.orchestrator.prompts import get_prompt
-
 from .llm_tools import LLM
 from .patient_context import update_from_answer
 from .state_types import ItemContext, SessionState
@@ -67,9 +65,33 @@ class StrategyNode:
         state.last_role = "user"
         state.last_user_text = answer
         state.waiting_for_user = False
+        previous_summary = state.patient_context.conversation_summary
         state.patient_context = update_from_answer(state.patient_context, answer)
 
-        facts = LLM.extract_facts(answer)
+        summary_result = LLM.call(
+            "summarize_context",
+            {"prev": previous_summary, "new": answer, "limit": 500},
+        )
+        summary = summary_result.get("summary") if isinstance(summary_result, dict) else None
+        if isinstance(summary, str) and summary.strip():
+            state.patient_context.conversation_summary = summary.strip()
+
+        theme_result = LLM.call("identify_themes", {"text": answer})
+        themes: List[str] = []
+        if isinstance(theme_result, dict):
+            raw_themes = theme_result.get("themes")
+            if isinstance(raw_themes, list):
+                themes = [t.strip() for t in raw_themes if isinstance(t, str) and t.strip()]
+        for theme in themes:
+            if theme not in state.patient_context.narrative_themes:
+                state.patient_context.narrative_themes.append(theme)
+
+        fact_result = LLM.call("extract_facts", {"text": answer})
+        facts: Dict[str, Any] = {}
+        if isinstance(fact_result, dict):
+            raw_facts = fact_result.get("facts")
+            if isinstance(raw_facts, dict):
+                facts = {k: v for k, v in raw_facts.items() if v not in (None, "")}
         if facts:
             state.patient_context.structured_facts.update(facts)
 
@@ -77,29 +99,72 @@ class StrategyNode:
             state.index, ItemContext(item_id=state.index, item_name=state.current_item_name)
         )
         item_ctx.dialogue.append({"role": "user", "text": answer})
+        if facts:
+            item_ctx.facts.update(facts)
+        for theme in themes:
+            if theme not in item_ctx.themes:
+                item_ctx.themes.append(theme)
 
         strategy_map = {entry["id"]: entry for entry in template.get("strategies", [])}
         current = state.current_strategy or "S2"
         current_cfg = strategy_map.get(current) or next(iter(strategy_map.values()), {})
 
-        for branch in current_cfg.get("branches", []):
-            condition = branch.get("condition", "")
-            if not condition:
-                continue
-            if _match_condition(condition, answer):
-                next_strategy = branch.get("next")
-                state.current_strategy = next_strategy or current
-                state.strategy_history.append(f"{current}->{next_strategy}({condition})")
-                hint = branch.get("next_prompt")
-                if hint:
-                    state.patient_context.pending_clarifications.append(hint)
-                state.strategy_substep_idx = 0
-                payload: Dict[str, Any] = {"branch": condition, "next_strategy": state.current_strategy}
-                if hint:
-                    payload["hint"] = hint
-                return payload
+        branches = current_cfg.get("branches", [])
+        selected_branch: Optional[Dict[str, Any]] = None
+        clarify_reason: Optional[str] = None
+        if branches:
+            clarify_result = LLM.call(
+                "clarify_branch",
+                {"answer": answer, "branches": branches, "strategy_id": current},
+            )
+            if isinstance(clarify_result, dict):
+                matched = clarify_result.get("matched")
+                next_strategy = clarify_result.get("next")
+                reason = clarify_result.get("reason")
+                if isinstance(reason, str) and reason.strip():
+                    clarify_reason = reason.strip()
+                if next_strategy:
+                    for branch in branches:
+                        if branch.get("next") == next_strategy and (
+                            not matched or branch.get("condition") == matched
+                        ):
+                            selected_branch = branch
+                            break
+                if selected_branch is None and matched:
+                    for branch in branches:
+                        if branch.get("condition") == matched:
+                            selected_branch = branch
+                            break
 
-        return {"branch": None}
+        if selected_branch is None:
+            for branch in branches:
+                condition = branch.get("condition", "")
+                if condition and _match_condition(condition, answer):
+                    selected_branch = branch
+                    if clarify_reason is None:
+                        clarify_reason = "heuristic_match"
+                    break
+
+        if selected_branch:
+            next_strategy = selected_branch.get("next")
+            condition = selected_branch.get("condition")
+            state.current_strategy = next_strategy or current
+            state.strategy_history.append(f"{current}->{next_strategy}({condition})")
+            hint = selected_branch.get("next_prompt")
+            if hint:
+                state.patient_context.pending_clarifications.append(hint)
+            state.strategy_substep_idx = 0
+            payload: Dict[str, Any] = {
+                "branch": condition,
+                "next_strategy": state.current_strategy,
+            }
+            if hint:
+                payload["hint"] = hint
+            if clarify_reason:
+                payload["clarify_reason"] = clarify_reason
+            return payload
+
+        return {"branch": None, "clarify_reason": clarify_reason}
 
     def _ask_next_question(self, state: SessionState, template: Dict[str, Any]) -> Dict[str, Any]:
         strategy_map = {entry["id"]: entry for entry in template.get("strategies", [])}
@@ -131,21 +196,33 @@ class StrategyNode:
         else:
             supplement = ""
 
-        prompt = get_prompt("question_generation").format(
-            context=f"{state.patient_context.to_prompt_snippet()}{supplement}",
-            strategy_id=current,
-            strategy_name=cfg.get("name", ""),
-            template=question_template,
-        )
-
-        question = LLM.generate(prompt)
-        state.last_role = "agent"
-        state.last_agent_text = question
-        state.waiting_for_user = True
-
         item_ctx = state.item_contexts.setdefault(
             state.index, ItemContext(item_id=state.index, item_name=state.current_item_name)
         )
+        dialogue_window = item_ctx.dialogue[-6:]
+        progress = {
+            "item_id": state.index,
+            "strategy": current,
+            "turn_index": len(item_ctx.dialogue),
+        }
+
+        generation_payload = {
+            "context": f"{state.patient_context.to_prompt_snippet()}{supplement}",
+            "template": question_template,
+            "strategy_id": current,
+            "strategy_name": cfg.get("name", ""),
+            "dialogue": dialogue_window,
+            "progress": progress,
+        }
+        generated = LLM.call("generate", generation_payload)
+        question = None
+        if isinstance(generated, dict):
+            question = generated.get("text") or generated.get("question")
+        if not isinstance(question, str) or not question.strip():
+            question = question_template
+        state.last_role = "agent"
+        state.last_agent_text = question
+        state.waiting_for_user = True
         item_ctx.dialogue.append({"role": "agent", "text": question})
 
         return {"ask": question, "strategy": current}

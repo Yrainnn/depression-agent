@@ -10,18 +10,26 @@ class ScoreNode:
     """Score completed items. Implementation is sequential but thread-safe."""
 
     def parallel_score(self, state: SessionState) -> List[Dict[str, object]]:
-        items: List[Dict[str, object]] = []
+        results: List[Dict[str, object]] = []
         for item_id, context in state.item_contexts.items():
-            items.append(
-                LLM.score_item(
-                    {
-                        "item_id": item_id,
-                        "facts": context.facts,
-                        "themes": context.themes,
-                        "summary": context.summary,
-                    }
-                )
+            dialogue_text = "\n".join(
+                f"{turn.get('role')}: {turn.get('text', '')}"
+                for turn in context.dialogue
+                if isinstance(turn, dict)
             )
-        total = sum(int(entry.get("score", 0)) for entry in items)
-        state.analysis = {"total_score": {"sum": total, "items": items}}
-        return items
+            payload = {
+                "item_id": item_id,
+                "item_name": context.item_name,
+                "facts": context.facts,
+                "themes": context.themes,
+                "summary": context.summary,
+                "dialogue": dialogue_text,
+            }
+            result = LLM.call("score_item", payload)
+            if not isinstance(result, dict):
+                result = {"item_id": item_id, "score": 0}
+            result.setdefault("item_id", item_id)
+            results.append(result)
+        total = sum(int(entry.get("score", 0)) for entry in results)
+        state.analysis = {"total_score": {"sum": total, "items": results}}
+        return results

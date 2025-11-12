@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import re
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict
 
 from services.orchestrator.prompts import get_prompt
 
@@ -11,94 +11,186 @@ except Exception:  # pragma: no cover - fallback when DeepSeek is unavailable
     _deepseek_client = None
 
 
-class _FallbackLLM:
-    """Minimal heuristics used when the real client is unavailable."""
+class _BaseBackend:
+    """Abstract backend definition for tool invocations."""
 
-    _RISK_TOKENS = ("想死", "结束生命", "自杀", "活着没意思")
-
-    def generate(self, prompt: str, **_: Any) -> str:
-        lines = [line.strip() for line in prompt.splitlines() if line.strip()]
-        for line in reversed(lines):
-            if line.endswith("？") or line.endswith("?"):
-                return line
-        return "最近两周，您的心情怎么样？"
-
-    def extract_facts(self, answer: str) -> Dict[str, Any]:
-        data: Dict[str, Any] = {}
-        match = re.search(r"(\d+)分", answer)
-        if match:
-            data["self_rating"] = int(match.group(1))
-        if any(token in answer for token in ("凌晨", "早醒", "夜里")):
-            data["sleep_pattern"] = "early_awake"
-        return data
-
-    def risk_detect(self, answer: str) -> Optional[str]:
-        if any(token in answer for token in self._RISK_TOKENS):
-            return "suicide_high"
-        return None
-
-    def identify_themes(self, text: str) -> List[str]:
-        vocab = ["失落", "罪恶", "绝望", "睡眠异常", "食欲改变", "焦虑", "兴趣缺失", "精力下降", "自责", "无价值感"]
-        _ = get_prompt("theme_identification").format(vocab=",".join(vocab), text=text)
-        themes: List[str] = []
-        if any(token in text for token in ("没意思", "绝望", "无望", "活不下去")):
-            themes.append("绝望")
-        if any(token in text for token in ("凌晨", "早醒", "三四点", "五点醒")):
-            themes.append("睡眠异常")
-        return list(dict.fromkeys(themes))
-
-    def summarize_context(self, previous: str, new: str, limit: int = 500) -> str:
-        _ = get_prompt("rolling_summary").format(prev=previous, new=new, limit=limit)
-        merged = (previous + " " + new).strip()
-        return merged[:limit]
-
-    def score_item(self, item_ctx: Dict[str, Any]) -> Dict[str, Any]:
-        facts = item_ctx.get("facts", {})
-        themes = item_ctx.get("themes", [])
-        score = 0
-        if facts.get("self_rating", 0) >= 7:
-            score = 3
-        if "绝望" in themes:
-            score = max(score, 2)
-        return {"item_id": item_ctx.get("item_id"), "score": score}
+    def call(self, func: str, payload: Dict[str, Any]) -> Any:  # pragma: no cover - interface
+        raise NotImplementedError
 
 
-class _DeepSeekLLM(_FallbackLLM):
-    """Light wrapper around the DeepSeek JSON client used by the project."""
+class _FallbackBackend(_BaseBackend):
+    """Offline fallback used during tests or when the LLM is unavailable."""
+
+    def call(self, func: str, payload: Dict[str, Any]) -> Any:
+        text = payload.get("text", "")
+        if func == "generate":
+            template = payload.get("template") or "最近两周您的心情是否低落？"
+            question = template.strip()
+            if not question.endswith("？") and not question.endswith("?"):
+                question += "？"
+            return {"text": question}
+        if func == "risk_detect":
+            if any(token in text for token in ("想死", "自杀", "活着没意思", "结束生命")):
+                return {"risk_level": "high"}
+            return {"risk_level": "none"}
+        if func == "extract_facts":
+            facts: Dict[str, Any] = {}
+            if "分" in text:
+                import re
+
+                if match := re.search(r"(\d+)分", text):
+                    facts["self_rating"] = int(match.group(1))
+            if any(token in text for token in ("凌晨", "早醒")):
+                facts["sleep_pattern"] = "early_awake"
+            return {"facts": facts}
+        if func == "identify_themes":
+            themes = []
+            if any(token in text for token in ("绝望", "没意思", "无望")):
+                themes.append("绝望")
+            if "凌晨" in text or "早醒" in text:
+                themes.append("睡眠异常")
+            return {"themes": themes}
+        if func == "summarize_context":
+            prev = payload.get("prev", "")
+            new = payload.get("new", "")
+            limit = int(payload.get("limit", 500))
+            summary = (prev + " " + new).strip()
+            return {"summary": summary[:limit]}
+        if func == "score_item":
+            return {"score": 2}
+        if func == "clarify_branch":
+            answer = payload.get("answer", "")
+            branches = payload.get("branches", []) or []
+            for branch in branches:
+                condition = branch.get("condition", "")
+                if any(token in answer for token in ("没有", "不", "偶尔", "说不清")) and "否定" in condition:
+                    return {
+                        "matched": condition,
+                        "next": branch.get("next"),
+                        "reason": "回答包含否定语气",
+                    }
+            if branches:
+                branch = branches[0]
+                return {
+                    "matched": branch.get("condition"),
+                    "next": branch.get("next"),
+                    "reason": "默认选择首分支",
+                }
+            return {"matched": None, "next": None, "reason": "无可用分支"}
+        raise ValueError(f"Unknown tool function: {func}")
+
+
+class _DeepSeekBackend(_BaseBackend):
+    """Backend delegating to the DeepSeek JSON client."""
 
     def __init__(self) -> None:
-        self._client = _deepseek_client
+        self.client = _deepseek_client
 
-    def generate(self, prompt: str, **kwargs: Any) -> str:  # pragma: no cover - network path
-        if not self._client or not getattr(self._client, "usable", lambda: False)():
-            return super().generate(prompt, **kwargs)
+    # ------------------------------------------------------------------
+    def _chat_json(self, prompt: str, *, temperature: float = 0.0, max_tokens: int = 512) -> Dict[str, Any]:
+        if not self.client or not getattr(self.client, "usable", lambda: False)():
+            return {}
         try:
-            payload = self._client.plan_turn(
-                dialogue=[],
-                progress={},
-                prompt=prompt,
+            content = self.client._post_chat(  # type: ignore[attr-defined]
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
         except Exception:
-            return super().generate(prompt, **kwargs)
-        question = payload.get("question") or payload.get("next_utterance")
-        if isinstance(question, str) and question.strip():
-            return question.strip()
-        return super().generate(prompt, **kwargs)
+            return {}
+        try:
+            return json.loads(content)
+        except Exception:
+            return {}
 
-    def extract_facts(self, answer: str) -> Dict[str, Any]:  # pragma: no cover - rely on fallback heuristics
-        return super().extract_facts(answer)
+    # ------------------------------------------------------------------
+    def call(self, func: str, payload: Dict[str, Any]) -> Any:
+        if not self.client or not getattr(self.client, "usable", lambda: False)():
+            return _FallbackBackend().call(func, payload)
 
-    def risk_detect(self, answer: str) -> Optional[str]:  # pragma: no cover - rely on fallback heuristics
-        return super().risk_detect(answer)
+        try:
+            if func == "generate":
+                prompt = get_prompt("strategy_generation").format(
+                    context=payload.get("context", ""),
+                    template=payload.get("template", ""),
+                )
+                dialogue = payload.get("dialogue") or []
+                progress = payload.get("progress") or {}
+                result = self.client.plan_turn(
+                    dialogue=dialogue,
+                    progress=progress,
+                    prompt=prompt,
+                )
+                question = None
+                if isinstance(result, dict):
+                    question = (
+                        result.get("question")
+                        or result.get("next")
+                        or result.get("next_utterance")
+                        or result.get("text")
+                    )
+                if isinstance(question, str) and question.strip():
+                    return {"text": question.strip(), "raw": result}
+                return _FallbackBackend().call(func, payload)
+            if func == "risk_detect":
+                prompt = get_prompt("risk_detection").format(text=payload.get("text", ""))
+                return self._chat_json(prompt)
+            if func == "extract_facts":
+                prompt = get_prompt("fact_extraction").format(text=payload.get("text", ""))
+                return self._chat_json(prompt)
+            if func == "identify_themes":
+                vocab = payload.get(
+                    "vocab",
+                    "失落,罪恶,绝望,焦虑,兴趣缺失,睡眠异常,食欲改变,精力下降,自责,无价值感",
+                )
+                prompt = get_prompt("theme_identification").format(vocab=vocab, text=payload.get("text", ""))
+                return self._chat_json(prompt)
+            if func == "summarize_context":
+                prompt = get_prompt("rolling_summary").format(
+                    prev=payload.get("prev", ""),
+                    new=payload.get("new", ""),
+                )
+                result = self._chat_json(prompt)
+                if result:
+                    limit = int(payload.get("limit", 500))
+                    summary = result.get("summary")
+                    if isinstance(summary, str):
+                        result["summary"] = summary[:limit]
+                return result
+            if func == "score_item":
+                prompt = get_prompt("single_item_scoring").format(
+                    item_name=payload.get("item_name", ""),
+                    facts=json.dumps(payload.get("facts", {}), ensure_ascii=False),
+                    themes=json.dumps(payload.get("themes", []), ensure_ascii=False),
+                    summary=payload.get("summary", ""),
+                    dialogue=payload.get("dialogue", ""),
+                )
+                return self._chat_json(prompt, max_tokens=256)
+            if func == "clarify_branch":
+                prompt = get_prompt("branch_clarification").format(
+                    answer=payload.get("answer", ""),
+                    branches=json.dumps(payload.get("branches", []), ensure_ascii=False),
+                )
+                return self._chat_json(prompt)
+        except Exception:
+            return _FallbackBackend().call(func, payload)
 
-    def identify_themes(self, text: str) -> List[str]:  # pragma: no cover - rely on fallback heuristics
-        return super().identify_themes(text)
-
-    def summarize_context(self, previous: str, new: str, limit: int = 500) -> str:  # pragma: no cover
-        return super().summarize_context(previous, new, limit)
-
-    def score_item(self, item_ctx: Dict[str, Any]) -> Dict[str, Any]:  # pragma: no cover
-        return super().score_item(item_ctx)
+        return _FallbackBackend().call(func, payload)
 
 
-LLM = _DeepSeekLLM() if _deepseek_client else _FallbackLLM()
+class LLMToolBox:
+    """Unified entry point for LangGraph LLM utilities."""
+
+    def __init__(self) -> None:
+        self.backend: _BaseBackend
+        if _deepseek_client:
+            self.backend = _DeepSeekBackend()
+        else:
+            self.backend = _FallbackBackend()
+
+    def call(self, tool_name: str, payload: Dict[str, Any]) -> Any:
+        return self.backend.call(tool_name, payload)
+
+
+LLM = LLMToolBox()
