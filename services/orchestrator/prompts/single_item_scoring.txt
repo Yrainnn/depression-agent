@@ -4,4 +4,4 @@
 主题：{themes}
 摘要：{summary}
 对话：{dialogue}
-输出 JSON：{"score": <0-4>, "reason": "简要理由"}
+输出 JSON：{{"score": <0-4>, "reason": "简要理由"}}
