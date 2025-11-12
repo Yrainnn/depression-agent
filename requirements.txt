@@ -1,4 +1,5 @@
 fastapi
+langgraph>=0.0.57
 uvicorn
 prometheus-client
 gradio
@@ -15,3 +16,4 @@ alibabacloud_oss_v2
 httpx>=0.27.0
 tenacity>=8.2.0
 oss2>=2.16.0
+PyYAML>=6.0
