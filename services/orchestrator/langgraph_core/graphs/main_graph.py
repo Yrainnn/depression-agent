@@ -30,8 +30,8 @@ def _wrap(node, **kwargs):
     return _inner
 
 
-def build_main_graph(template_root: str) -> Any:
-    """构建 LangGraph 主图"""
+def create_state_graph(template_root: str) -> StateGraph:
+    """构建 LangGraph 主图的声明式结构（未编译）。"""
 
     init_node = InitNode("init_context", template_root)
     strategy_node = StrategyNode("strategy_router")
@@ -69,11 +69,21 @@ def build_main_graph(template_root: str) -> Any:
             return "output"
         return "strategy_flow"
 
-    graph.add_conditional_edges("risk_gate", _post_risk, {"output": "output", "strategy_flow": "strategy_flow"})
+    graph.add_conditional_edges(
+        "risk_gate",
+        _post_risk,
+        {"output": "output", "strategy_flow": "strategy_flow"},
+    )
     graph.add_edge("strategy_flow", "output")
     graph.add_edge("output", END)
 
-    return graph.compile()
+    return graph
+
+
+def build_main_graph(template_root: str) -> Any:
+    """编译后的 LangGraph 主图。"""
+
+    return create_state_graph(template_root).compile()
 
 
 class GraphRuntime:
