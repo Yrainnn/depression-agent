@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from services.orchestrator import langgraph_main as coordinator_module
+
+
+@pytest.fixture()
+def patched_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    log_path = tmp_path / "log.jsonl"
+    snap_dir = tmp_path / "snaps"
+    monkeypatch.setattr(coordinator_module, "_LOG_PATH", str(log_path))
+    monkeypatch.setattr(coordinator_module, "_SNAPSHOT_DIR", str(snap_dir))
+    return log_path, snap_dir
+
+
+def test_langgraph_basic_flow(patched_paths):
+    coord = coordinator_module.LangGraphCoordinator(total_items=1, template_dir="services/orchestrator/config")
+    first = coord.step(role="agent")
+    assert first["waiting_for_user"] is True
+    assert first["ask"]
+
+    answer = "最近心情很低落，凌晨会醒来，我给自己打7分"
+    second = coord.step(role="user", text=answer)
+    assert second["branch"] in {None, "明确存在抑郁情绪"}
+
+    third = coord.step(role="agent")
+    assert third["ask"]
+
+    final = coord.next_item()
+    assert final["event"] == "next_item"
+    assert coord.state.completed is True
+    analysis = coord.state.analysis
+    assert analysis is not None
+    assert analysis["total_score"]["items"][0]["item_id"] == 1
+    assert analysis["total_score"]["items"][0]["score"] >= 0
+
+
+def test_risk_gate_triggers(patched_paths):
+    coord = coordinator_module.LangGraphCoordinator(total_items=1, template_dir="services/orchestrator/config")
+    coord.step(role="agent")
+    payload = coord.step(role="user", text="我想结束生命")
+    # 风险节点当前为占位实现，直接进入策略流程
+    assert "event" not in payload
+    assert not coord.state.patient_context.active_risks
