@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-try:  # pragma: no cover - prefer real langgraph implementation
-    from langgraph.graph import END, StateGraph  # type: ignore
-except ImportError:  # pragma: no cover - fallback stub
-    from .graph_stub import END, StateGraph
+from langgraph.graph import END, StateGraph  # type: ignore
 
 from ..nodes.node_init import InitNode
 from ..nodes.node_output import OutputNode
