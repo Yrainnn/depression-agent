@@ -1,0 +1,8 @@
+根据以下内容评估抑郁项目得分：
+项目名：{item_name}
+事实：{facts}
+主题：{themes}
+摘要：{summary}
+风险：{risks}
+对话：{dialogue}
+输出 JSON：{{"score": <0-4>, "reason": "简要理由"}}
