@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from time import monotonic
 from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -14,14 +12,6 @@ from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from packages.common.config import settings
-from services.llm.prompts import (
-    get_prompt_clarify_cn,
-    get_prompt_diagnosis,
-    get_prompt_hamd17,
-    get_prompt_hamd17_controller,
-    get_prompt_mdd_judgment,
-)
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -86,8 +76,6 @@ class DeepSeekJSONClient:
         self.key = key or settings.deepseek_api_key
         self.model = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
         self.chat_timeout = float(settings.deepseek_chat_timeout)
-        self.clarify_timeout = float(settings.deepseek_clarify_timeout)
-        self.controller_timeout = float(settings.deepseek_controller_timeout)
         self._warned_bad_base = False
         self._circuit_open_until: Optional[float] = None
         trimmed_base = (self.base or "").rstrip("/")
@@ -203,143 +191,68 @@ class DeepSeekJSONClient:
             self._circuit_open_until = None
             return data["choices"][0]["message"]["content"]
 
-    def analyze(
+    def chat(
         self,
-        dialogue_json: List[dict],
-        system_prompt: Optional[str] = None,
         *,
+        messages: List[Dict[str, Any]],
+        response_format: Optional[Dict[str, Any]] = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+        timeout: Optional[float] = None,
         stream: bool = False,
-    ) -> HAMDResult:
-        if not self.usable():
-            raise DeepSeekTemporarilyUnavailableError(
-                "DeepSeek analyze skipped because the client is temporarily unavailable"
-            )
-        prompt = system_prompt or get_prompt_hamd17()
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(dialogue_json, ensure_ascii=False)},
-        ]
-        try:
-            content = self._post_chat(
-                messages=messages,
-                response_format={"type": "json_object"},
-                timeout=self.chat_timeout,
-                stream=stream,
-            )
-            parsed = json.loads(content)
-            return HAMDResult.model_validate(parsed)
-        except DeepSeekTemporarilyUnavailableError:
-            raise
-        except Exception as exc:  # pragma: no cover - runtime guard
-            LOGGER.warning("DeepSeek analyze failed: %s", exc)
-            raise
+    ) -> str:
+        """Send a chat completion request and return the assistant content."""
 
-    def gen_clarify_question(
-        self,
-        item_id: int,
-        item_name: str,
-        clarify_need: str,
-        evidence_text: str,
-    ) -> Optional[str]:
-        prompt = get_prompt_clarify_cn().format(
-            item_id=item_id,
-            item_name=item_name,
-            clarify_need=clarify_need or "（未标注）",
-            evidence_text=(evidence_text or "（无明确证据片段）")[:200],
+        return self._post_chat(
+            messages=messages,
+            response_format=response_format,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            stream=stream,
         )
-        try:
-            content = self._post_chat(
-                messages=[{"role": "user", "content": prompt}],
-                response_format=None,
-                max_tokens=64,
-                temperature=0.2,
-                timeout=self.clarify_timeout,
-            )
-            text = (content or "").strip()
-            for end in ["？", "。", "!", "！", "?"]:
-                if end in text:
-                    text = text.split(end)[0] + end
-                    break
-            return text[:30] if text else None
-        except DeepSeekTemporarilyUnavailableError:
-            return None
-        except Exception as exc:  # pragma: no cover - runtime guard
-            LOGGER.warning("DeepSeek clarify generation failed: %s", exc)
-            return None
 
-    def plan_turn(
+    def call(
         self,
-        dialogue: List[dict],
-        progress: dict,
-        *,
         prompt: str,
+        *,
+        response_format: Optional[Dict[str, Any]] = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+        timeout: Optional[float] = None,
         stream: bool = False,
-    ) -> dict:
-        """Invoke DeepSeek controller to plan the next turn."""
+    ) -> str:
+        """Convenience wrapper for single-message prompts."""
 
-        if not self.usable():
-            raise DeepSeekTemporarilyUnavailableError(
-                "DeepSeek controller planning skipped because the client is temporarily unavailable"
-            )
+        return self.chat(
+            messages=[{"role": "user", "content": prompt}],
+            response_format=response_format,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            stream=stream,
+        )
 
-        import time
+    def call_json(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+        timeout: Optional[float] = None,
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        """Invoke DeepSeek for a strict JSON response."""
 
-        start = time.time()
-        print("🔥 DeepSeek plan_turn 已执行", flush=True)
-
-        payload = {
-            "dialogue": dialogue,
-            "progress": progress,
-            "instruction": prompt,
-        }
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ]
-
-        fallback: dict = {"decision": "ask", "question": None}
-        content: Optional[Any] = None
-
-        try:
-            content = self._post_chat(
-                messages=messages,
-                response_format={"type": "json_object"},
-                timeout=self.controller_timeout,
-                stream=stream,
-            )
-            elapsed = time.time() - start
-            print(f"⏱️ DeepSeek 调用耗时 {elapsed:.2f} 秒", flush=True)
-            data: Optional[Any]
-            if isinstance(content, str):
-                try:
-                    cleaned = re.search(r"\{.*\}", content, re.S)
-                    if cleaned:
-                        data = json.loads(cleaned.group(0))
-                    else:
-                        raise ValueError("No JSON object found in response text.")
-                except Exception as decode_exc:
-                    print(
-                        f"⚠️ DeepSeek plan_turn JSON decode error: {decode_exc}",
-                        flush=True,
-                    )
-                    LOGGER.warning(
-                        "DeepSeek plan_turn decode failure: %s", decode_exc
-                    )
-                    return fallback
-            else:
-                data = content
-            if not isinstance(data, dict):
-                raise ValueError("DeepSeek plan_turn payload must be a JSON object")
-            LOGGER.info(
-                "[DeepSeek plan_turn] 调用成功 - action=%s question=%s",
-                data.get("decision") or data.get("action"),
-                data.get("question") or data.get("next_utterance"),
-            )
-            return data
-        except Exception as exc:
-            print(f"❌ DeepSeek 调用失败: {exc}", flush=True)
-            LOGGER.warning(f"[DeepSeek plan_turn] 调用失败: {exc}")
-            return fallback
+        content = self.call(
+            prompt,
+            response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            stream=stream,
+        )
+        return json.loads(content)
 
 
 # Convenience singleton -------------------------------------------------
@@ -352,8 +265,4 @@ __all__ = [
     "HAMDResult",
     "HAMDTotal",
     "client",
-    "get_prompt_hamd17",
-    "get_prompt_diagnosis",
-    "get_prompt_mdd_judgment",
-    "get_prompt_clarify_cn",
 ]
