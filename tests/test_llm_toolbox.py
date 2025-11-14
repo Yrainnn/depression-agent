@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
+import json
 from typing import Any, Dict, List
 
 import pytest
@@ -53,6 +54,11 @@ def test_toolbox_fallback_branch(monkeypatch: pytest.MonkeyPatch):
     question = toolbox.call("generate", {"template": "请描述一下最近的情绪"})
     assert question["text"].startswith("请描述一下最近的情绪")
     assert question["text"].endswith("？")
+
+    template_response = toolbox.call("template_builder", {"prompt": "示例prompt"})
+    payload = json.loads(template_response["text"])
+    assert "yaml" in payload
+    assert "strategy_descriptions" in payload
 
     branches = [
         {"condition": "否定或含糊", "next": "S10"},

@@ -23,6 +23,12 @@ class _FallbackBackend(_BaseBackend):
 
     def call(self, func: str, payload: Dict[str, Any]) -> Any:
         text = payload.get("text", "")
+        if func == "template_builder":
+            stub = {
+                "yaml": "project_id: 0\nstrategies: {}\n",
+                "strategy_descriptions": {},
+            }
+            return {"text": json.dumps(stub, ensure_ascii=False)}
         if func == "generate":
             template = payload.get("template") or "最近两周您的心情是否低落？"
             question = template.strip()
@@ -171,6 +177,12 @@ class _DeepSeekBackend(_BaseBackend):
             return _FallbackBackend().call(func, payload)
 
         try:
+            if func == "template_builder":
+                prompt = payload.get("prompt", "")
+                result = self._chat_json(prompt, max_tokens=1024)
+                if result:
+                    return {"text": json.dumps(result, ensure_ascii=False)}
+                return _FallbackBackend().call(func, payload)
             if func == "generate":
                 prompt = get_prompt("strategy_generation").format(
                     context=payload.get("context", ""),
