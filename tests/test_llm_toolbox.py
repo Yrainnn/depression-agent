@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
+import json
 from typing import Any, Dict, List
 
 import pytest
@@ -54,6 +55,11 @@ def test_toolbox_fallback_branch(monkeypatch: pytest.MonkeyPatch):
     assert question["text"].startswith("请描述一下最近的情绪")
     assert question["text"].endswith("？")
 
+    template_response = toolbox.call("template_builder", {"prompt": "示例prompt"})
+    payload = json.loads(template_response["text"])
+    assert "yaml" in payload
+    assert "strategy_descriptions" in payload
+
     branches = [
         {"condition": "否定或含糊", "next": "S10"},
         {"condition": "明确存在抑郁情绪", "next": "S4"},
@@ -66,7 +72,7 @@ def test_toolbox_fallback_branch(monkeypatch: pytest.MonkeyPatch):
 def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
     module = _reload_llm_module(monkeypatch)
     responses = [
-        {"risk_level": "none"},
+        {"risk_level": "none", "triggers": [], "reason": "未发现危险信号"},
         {"facts": {"self_rating": 3}},
         {"themes": ["绝望"]},
         {"summary": "旧摘要与新内容合并后的结果应被截断"},
@@ -101,7 +107,8 @@ def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
     assert "示例上下文" in stub.plan_turn_calls[0]["prompt"]
 
     risk = toolbox.call("risk_detect", {"text": "没有危险信号"})
-    assert risk == {"risk_level": "none"}
+    assert risk["risk_level"] == "none"
+    assert "reason" in risk
 
     facts = toolbox.call("extract_facts", {"text": "我给自己打3分"})
     assert facts["facts"]["self_rating"] == 3
