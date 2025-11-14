@@ -132,8 +132,9 @@ class ClarifyNode(Node):
             if source_strategy:
                 attempts = state.clarify_attempts.get(source_strategy, 0) + 1
                 state.clarify_attempts[source_strategy] = attempts
-                if attempts >= max(state.max_clarify_attempts, 1) and state.default_next_strategy:
-                    next_strategy = state.default_next_strategy
+                if attempts >= max(state.max_clarify_attempts, 1):
+                    state.clarify_attempts.pop(source_strategy, None)
+                    next_strategy = "END"
                     reason = "clarify_limit"
             if not next_strategy:
                 clarify_cfg = state.strategy_map.get(source_strategy or "", {})

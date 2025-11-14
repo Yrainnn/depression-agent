@@ -135,6 +135,7 @@ def test_clarify_retries_then_falls_back_to_default():
     state.max_clarify_attempts = 2
     strategy_node = StrategyNode("strategy")
     clarify_node = ClarifyNode("clarify")
+    update_node = UpdateNode("update")
 
     clarify_responses = iter(
         [
@@ -175,8 +176,12 @@ def test_clarify_retries_then_falls_back_to_default():
         assert "S1" not in state.strategy_prompt_overrides
 
         clarify_second = clarify_node.run(state, user_text="还是说不清")
-        assert clarify_second["next_strategy"] == "S2"
+        assert clarify_second["next_strategy"] == "END"
         assert clarify_second["clarify_reason"] == "clarify_limit"
-        assert state.current_strategy == "S2"
-        assert state.strategy_graph["S1"] == [{"to": "S2", "condition": "clarify_limit"}]
+        assert state.strategy_graph["S1"] == [{"to": "END", "condition": "clarify_limit"}]
         assert "S1" not in state.clarify_attempts
+
+        update_result = update_node.run(state, user_text="还是说不清", **clarify_second)
+        assert update_result["next_strategy"] == "END"
+        assert state.current_strategy == "END"
+        assert state.completed is True
