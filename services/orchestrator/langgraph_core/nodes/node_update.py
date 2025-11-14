@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from ..context.item_context import append_dialogue, ensure_item_context
 from ..context.patient_context import reinforce_with_context, update_patient_context
-from ..llm_tools import LLM
+from ..llm_tools import ExtractFactsTool, IdentifyThemesTool, LLM, SummarizeContextTool
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -34,12 +34,12 @@ class UpdateNode(Node):
         state.last_user_text = user_text
         update_patient_context(state.patient_context, user_text)
 
-        facts_resp = LLM.call("extract_facts", {"text": user_text}) or {}
+        facts_resp = LLM.call(ExtractFactsTool, {"text": user_text}) or {}
         facts = facts_resp.get("facts") if isinstance(facts_resp, dict) else None
         if isinstance(facts, dict):
             state.patient_context.structured_facts.update(facts)
 
-        themes_resp = LLM.call("identify_themes", {"text": user_text}) or {}
+        themes_resp = LLM.call(IdentifyThemesTool, {"text": user_text}) or {}
         themes = themes_resp.get("themes") if isinstance(themes_resp, dict) else None
         if isinstance(themes, list):
             for theme in themes:
@@ -47,7 +47,7 @@ class UpdateNode(Node):
                     state.patient_context.narrative_themes.append(theme)
 
         summary_resp = LLM.call(
-            "summarize_context",
+            SummarizeContextTool,
             {"prev": state.patient_context.conversation_summary, "new": user_text, "limit": 500},
         )
         summary = summary_resp.get("summary") if isinstance(summary_resp, dict) else None

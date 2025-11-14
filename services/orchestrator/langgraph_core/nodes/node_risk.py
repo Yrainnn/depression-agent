@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from ..llm_tools import LLM
+from packages.common.config import settings
+from services.tts.tts_adapter import TTSAdapter
+
+from ..llm_tools import LLM, RiskDetectTool
+from ..media import build_media_payload
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -12,13 +16,62 @@ class RiskNode(Node):
 
     def __init__(self, name: str):
         super().__init__(name)
+        self._tts_adapter = TTSAdapter()
+        self._digital_human_enabled = bool(
+            getattr(settings, "digital_human_enabled", False)
+        )
 
     def run(self, state: SessionState, **kwargs: Any) -> Dict[str, Any]:
-        user_text = str(kwargs.get("user_text") or "")
+        user_text = str(kwargs.get("user_text") or "").strip()
         if not user_text:
             return {}
-        result = LLM.call("risk_detect", {"text": user_text}) or {}
-        risk_level = result.get("risk_level")
+
+        raw_result = LLM.call(RiskDetectTool, {"text": user_text}) or {}
+        if not isinstance(raw_result, dict):
+            raw_result = {}
+
+        risk_level = str(raw_result.get("risk_level") or "none").lower()
+        if risk_level not in {"none", "low", "medium", "high"}:
+            risk_level = "none"
+
+        normalized: Dict[str, Any] = {"risk_level": risk_level}
+
+        triggers = raw_result.get("triggers") or raw_result.get("risk_triggers")
+        if isinstance(triggers, (list, tuple)):
+            cleaned = [str(trigger).strip() for trigger in triggers if str(trigger).strip()]
+            if cleaned:
+                normalized["risk_triggers"] = cleaned
+
+        reason = raw_result.get("reason") or raw_result.get("rationale")
+        if isinstance(reason, str) and reason.strip():
+            normalized["risk_reason"] = reason.strip()
+
+        advice = raw_result.get("advice")
+        if isinstance(advice, str) and advice.strip():
+            normalized["risk_advice"] = advice.strip()
+
+        message = raw_result.get("message")
+        if isinstance(message, str) and message.strip():
+            normalized["message"] = message.strip()
+
         if risk_level == "high":
-            return {"risk_level": "high", "message": "检测到高危表述"}
-        return {}
+            normalized.setdefault("message", "检测到高危表述，请立即转接人工支持。")
+
+        if "message" in normalized:
+            media = build_media_payload(
+                self._tts_adapter,
+                state.sid,
+                normalized["message"],
+                digital_human_enabled=self._digital_human_enabled,
+            )
+            if media:
+                normalized["risk_media"] = media
+                normalized["risk_media_type"] = media.get("media_type")
+                tts_url = media.get("tts_url")
+                if tts_url:
+                    normalized["risk_tts_url"] = tts_url
+                video_url = media.get("video_url")
+                if video_url:
+                    normalized["risk_video_url"] = video_url
+
+        return normalized

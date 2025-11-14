@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-import json
 import os
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
+
+import logging
+
+try:
+    from services.report.build import build_pdf
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency guard
+    def build_pdf(*_args, **_kwargs):  # type: ignore[override]
+        raise RuntimeError("report generation dependencies are unavailable") from exc
 
 from .langgraph_core.context.item_context import finalize_item_context
 from .langgraph_core.graphs.main_graph import GraphRuntime
 from .langgraph_core.nodes.node_output import OutputNode
 from .langgraph_core.nodes.node_score import ScoreNode
+from .langgraph_core.reporting import prepare_report_payload
 from .langgraph_core.state_types import SessionState
 from .langgraph_core.utils import now_iso, save_snapshot, write_jsonl
 
@@ -15,6 +23,8 @@ _BASE = os.path.dirname(__file__)
 _CONFIG_DIR = os.path.join(_BASE, "config")
 _LOG_PATH = os.path.join(_BASE, "logs", "session_log.jsonl")
 _SNAPSHOT_DIR = os.path.join(_BASE, "state_snapshots")
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LangGraphCoordinator:
@@ -34,7 +44,21 @@ class LangGraphCoordinator:
 
     def step(self, role: str, text: Optional[str] = None) -> Dict[str, object]:
         payload = self.runtime.invoke(self.state, role=role, text=text)
+        if self.state.completed:
+            if self.state.analysis is None:
+                self.score_node.run(self.state)
+            if self.state.report_payload is None:
+                self.state.report_payload = prepare_report_payload(self.state)
+            if self.state.report_payload and self.state.report_result is None:
+                try:
+                    self.state.report_result = build_pdf(
+                        self.state.sid, dict(self.state.report_payload)
+                    )
+                except Exception:  # pragma: no cover - report generation guard
+                    LOGGER.exception("Report generation failed for %s", self.state.sid)
         response = payload
+        if self.state.completed:
+            response = self.output_node.run(self.state, payload=payload)
         record = {
             "sid": self.state.sid,
             "role": role,
@@ -54,6 +78,14 @@ class LangGraphCoordinator:
         if self.state.index > self.state.total:
             self.state.completed = True
             self.score_node.run(self.state)
+            self.state.report_payload = prepare_report_payload(self.state)
+            if self.state.report_payload:
+                try:
+                    self.state.report_result = build_pdf(
+                        self.state.sid, dict(self.state.report_payload)
+                    )
+                except Exception:  # pragma: no cover - report generation guard
+                    LOGGER.exception("Report generation failed for %s", self.state.sid)
         else:
             self.state.current_strategy = ""
             self.state.current_template = None
@@ -80,15 +112,3 @@ class LangGraphCoordinator:
         response_payload = {"event": "next_item", **payload}
         response = self.output_node.run(self.state, payload=response_payload)
         return response
-
-
-if __name__ == "__main__":
-    coordinator = LangGraphCoordinator(total_items=1)
-    first = coordinator.step(role="agent")
-    print("Agent:", json.dumps(first, ensure_ascii=False))
-    second = coordinator.step(role="user", text="最近心情很低落，尤其凌晨会醒来")
-    print("User:", json.dumps(second, ensure_ascii=False))
-    third = coordinator.next_item()
-    print("Next:", json.dumps(third, ensure_ascii=False))
-    if coordinator.state.completed:
-        print("Analysis:", json.dumps(coordinator.state.analysis, ensure_ascii=False))

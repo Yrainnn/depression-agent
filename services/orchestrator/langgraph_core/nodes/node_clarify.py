@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from ..llm_tools import LLM
+from ..llm_tools import ClarifyBranchTool, LLM, MatchConditionTool
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -38,7 +38,7 @@ def _match_condition(condition: str, answer: str) -> bool:
 
     payload = {"answer": answer, "condition": condition}
     try:
-        result = LLM.call("match_condition", payload) or {}
+        result = LLM.call(MatchConditionTool, payload) or {}
     except Exception:
         result = {}
 
@@ -97,7 +97,7 @@ class ClarifyNode(Node):
             return {"branch": None, "next_strategy": state.current_strategy}
 
         payload = {"answer": answer, "branches": branches}
-        result = LLM.call("clarify_branch", payload) or {}
+        result = LLM.call(ClarifyBranchTool, payload) or {}
         matched = result.get("matched")
         next_strategy = result.get("next")
         reason = result.get("reason")
@@ -132,8 +132,9 @@ class ClarifyNode(Node):
             if source_strategy:
                 attempts = state.clarify_attempts.get(source_strategy, 0) + 1
                 state.clarify_attempts[source_strategy] = attempts
-                if attempts >= max(state.max_clarify_attempts, 1) and state.default_next_strategy:
-                    next_strategy = state.default_next_strategy
+                if attempts >= max(state.max_clarify_attempts, 1):
+                    state.clarify_attempts.pop(source_strategy, None)
+                    next_strategy = "END"
                     reason = "clarify_limit"
             if not next_strategy:
                 clarify_cfg = state.strategy_map.get(source_strategy or "", {})
