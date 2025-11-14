@@ -7,7 +7,7 @@ from services.orchestrator.prompts.strategy_descriptions import (
 )
 
 from ..context.item_context import append_dialogue, ensure_item_context
-from ..llm_tools import LLM
+from ..llm_tools import GenerateTool, LLM
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -151,7 +151,7 @@ class StrategyNode(Node):
                 "dialogue": state.item_contexts[state.index].dialogue,
                 "progress": {"index": state.index, "total": state.total},
             }
-            result = LLM.call("generate", payload) or {}
+            result = LLM.call(GenerateTool, payload) or {}
             question = result.get("text") or template_text
             question = str(question).strip()
             if question:

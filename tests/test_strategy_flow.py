@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from unittest.mock import patch
+
+from services.orchestrator.langgraph_core.llm_tools import (
+    ClarifyBranchTool,
+    GenerateTool,
+    MatchConditionTool,
+)
 from services.orchestrator.langgraph_core.nodes.node_clarify import ClarifyNode
 from services.orchestrator.langgraph_core.nodes.node_strategy import StrategyNode
 from services.orchestrator.langgraph_core.nodes.node_update import UpdateNode
@@ -137,13 +143,13 @@ def test_clarify_retries_then_falls_back_to_default():
         ]
     )
 
-    def fake_call(func: str, payload: dict) -> dict:
-        if func == "generate":
+    def fake_call(tool, payload: dict) -> dict:
+        if tool is GenerateTool:
             template_text = payload.get("template", "")
             return {"text": template_text}
-        if func == "clarify_branch":
+        if tool is ClarifyBranchTool:
             return next(clarify_responses)
-        if func == "match_condition":
+        if tool is MatchConditionTool:
             condition = payload.get("condition", "")
             answer = payload.get("answer", "")
             if "肯定" in condition:

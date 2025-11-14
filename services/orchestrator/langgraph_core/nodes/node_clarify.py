@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from ..llm_tools import LLM
+from ..llm_tools import ClarifyBranchTool, LLM, MatchConditionTool
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -38,7 +38,7 @@ def _match_condition(condition: str, answer: str) -> bool:
 
     payload = {"answer": answer, "condition": condition}
     try:
-        result = LLM.call("match_condition", payload) or {}
+        result = LLM.call(MatchConditionTool, payload) or {}
     except Exception:
         result = {}
 
@@ -97,7 +97,7 @@ class ClarifyNode(Node):
             return {"branch": None, "next_strategy": state.current_strategy}
 
         payload = {"answer": answer, "branches": branches}
-        result = LLM.call("clarify_branch", payload) or {}
+        result = LLM.call(ClarifyBranchTool, payload) or {}
         matched = result.get("matched")
         next_strategy = result.get("next")
         reason = result.get("reason")

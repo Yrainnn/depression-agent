@@ -23,27 +23,18 @@ def _reload_llm_module(monkeypatch: pytest.MonkeyPatch):
 
 class _StubDeepSeek:
     def __init__(self) -> None:
-        self.plan_turn_calls: List[Dict[str, Any]] = []
+        self.call_prompts: List[Dict[str, Any]] = []
 
     def usable(self) -> bool:
         return True
 
-    def plan_turn(
-        self,
-        *,
-        dialogue: List[dict] | None = None,
-        progress: Dict[str, Any] | None = None,
-        prompt: str,
-        **_: Any,
-    ) -> Dict[str, Any]:
-        self.plan_turn_calls.append(
-            {
-                "dialogue": dialogue or [],
-                "progress": progress or {},
-                "prompt": prompt,
-            }
-        )
-        return {"question": "请问现在感觉如何？"}
+    def call(self, prompt: str, **kwargs: Any) -> str:
+        self.call_prompts.append({"prompt": prompt, **kwargs})
+        return "请问现在感觉如何？"
+
+    def call_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        self.call_prompts.append({"prompt": prompt, **kwargs})
+        return {}
 
 
 def test_toolbox_fallback_branch(monkeypatch: pytest.MonkeyPatch):
@@ -51,11 +42,11 @@ def test_toolbox_fallback_branch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(module, "_deepseek_client", None, raising=False)
 
     toolbox = module.LLMToolBox()
-    question = toolbox.call("generate", {"template": "请描述一下最近的情绪"})
+    question = toolbox.call(module.GenerateTool, {"template": "请描述一下最近的情绪"})
     assert question["text"].startswith("请描述一下最近的情绪")
     assert question["text"].endswith("？")
 
-    template_response = toolbox.call("template_builder", {"prompt": "示例prompt"})
+    template_response = toolbox.call(module.TemplateBuilderTool, {"prompt": "示例prompt"})
     payload = json.loads(template_response["text"])
     assert "yaml" in payload
     assert "strategy_descriptions" in payload
@@ -64,7 +55,7 @@ def test_toolbox_fallback_branch(monkeypatch: pytest.MonkeyPatch):
         {"condition": "否定或含糊", "next": "S10"},
         {"condition": "明确存在抑郁情绪", "next": "S4"},
     ]
-    clarified = toolbox.call("clarify_branch", {"answer": "没有太大影响", "branches": branches})
+    clarified = toolbox.call(module.ClarifyBranchTool, {"answer": "没有太大影响", "branches": branches})
     assert clarified["next"] == "S10"
     assert "否定" in clarified["reason"]
 
@@ -94,7 +85,7 @@ def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
 
     toolbox = module.LLMToolBox()
     generated = toolbox.call(
-        "generate",
+        module.GenerateTool,
         {
             "context": "示例上下文",
             "template": "请简单描述一下今日心情",
@@ -103,27 +94,27 @@ def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
         },
     )
     assert generated["text"] == "请问现在感觉如何？"
-    assert stub.plan_turn_calls
-    assert "示例上下文" in stub.plan_turn_calls[0]["prompt"]
+    assert stub.call_prompts
+    assert "示例上下文" in stub.call_prompts[0]["prompt"]
 
-    risk = toolbox.call("risk_detect", {"text": "没有危险信号"})
+    risk = toolbox.call(module.RiskDetectTool, {"text": "没有危险信号"})
     assert risk["risk_level"] == "none"
     assert "reason" in risk
 
-    facts = toolbox.call("extract_facts", {"text": "我给自己打3分"})
+    facts = toolbox.call(module.ExtractFactsTool, {"text": "我给自己打3分"})
     assert facts["facts"]["self_rating"] == 3
 
-    themes = toolbox.call("identify_themes", {"text": "感觉很绝望"})
+    themes = toolbox.call(module.IdentifyThemesTool, {"text": "感觉很绝望"})
     assert themes["themes"] == ["绝望"]
 
     summary = toolbox.call(
-        "summarize_context",
+        module.SummarizeContextTool,
         {"prev": "旧摘要", "new": "新的内容", "limit": 10},
     )
     assert len(summary["summary"]) <= 10
 
     score = toolbox.call(
-        "score_item",
+        module.ScoreItemTool,
         {
             "item_name": "项目1",
             "facts": {"a": 1},
@@ -136,7 +127,7 @@ def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
     assert chat_calls[-1]["max_tokens"] == 256
 
     clarified = toolbox.call(
-        "clarify_branch",
+        module.ClarifyBranchTool,
         {
             "answer": "患者否认严重症状",
             "branches": [

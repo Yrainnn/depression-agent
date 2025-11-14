@@ -32,8 +32,8 @@ def test_template_builder_generates_yaml_and_descriptions(tmp_path: Path, monkey
         },
     }
 
-    def fake_call(tool_name: str, payload: dict) -> dict:
-        assert tool_name == "template_builder"
+    def fake_call(tool, payload: dict) -> dict:
+        assert tool is tba.TemplateBuilderTool
         assert "策略描述" in payload["prompt"]
         return {"text": json.dumps(llm_payload, ensure_ascii=False)}
 

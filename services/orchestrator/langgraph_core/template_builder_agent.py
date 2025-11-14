@@ -13,7 +13,7 @@ try:  # pragma: no cover - prefer PyYAML when available
 except Exception:  # pragma: no cover - fallback to internal dumper
     yaml = None
 
-from .llm_tools import LLM
+from .llm_tools import LLM, TemplateBuilderTool
 from .utils import _safe_load_fallback
 
 
@@ -76,7 +76,7 @@ class TemplateBuilderAgent:
             "原始策略稿如下：\n"
             f"{text}"
         )
-        response = LLM.call("template_builder", {"prompt": prompt})
+        response = LLM.call(TemplateBuilderTool, {"prompt": prompt})
         payload_text = response.get("text", "") if isinstance(response, dict) else ""
         if not payload_text.strip():
             raise ValueError("LLM did not return JSON content for template building")

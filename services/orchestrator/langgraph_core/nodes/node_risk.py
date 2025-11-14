@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from ..llm_tools import LLM
+from ..llm_tools import LLM, RiskDetectTool
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -18,7 +18,7 @@ class RiskNode(Node):
         if not user_text:
             return {}
 
-        raw_result = LLM.call("risk_detect", {"text": user_text}) or {}
+        raw_result = LLM.call(RiskDetectTool, {"text": user_text}) or {}
         if not isinstance(raw_result, dict):
             raw_result = {}
 
