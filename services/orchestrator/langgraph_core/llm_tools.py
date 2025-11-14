@@ -162,6 +162,7 @@ class _DeepSeekBackend(_BaseBackend):
                     facts=json.dumps(payload.get("facts", {}), ensure_ascii=False),
                     themes=json.dumps(payload.get("themes", []), ensure_ascii=False),
                     summary=payload.get("summary", ""),
+                    risks=json.dumps(payload.get("risks", []), ensure_ascii=False),
                     dialogue=payload.get("dialogue", ""),
                 )
                 return self._chat_json(prompt, max_tokens=256)

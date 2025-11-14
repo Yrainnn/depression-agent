@@ -22,6 +22,7 @@ class ScoreNode(Node):
                 "themes": ctx.themes,
                 "summary": ctx.summary,
                 "dialogue": ctx.dialogue,
+                "risks": ctx.risks,
             }
             result = LLM.call("score_item", payload) or {}
             score = result.get("score", 0)

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict
-
-from ..state_types import PatientContext, ItemContext
+from ..state_types import ItemContext, PatientContext
 
 _FUZZY_TOKENS = ("偶尔", "一般", "不太", "说不清", "还好")
 _THEME_TOKENS = {"绝望": ("绝望", "没意思", "无望", "活不下去"), "睡眠异常": ("凌晨", "早醒", "三四点", "五点醒")}
@@ -27,24 +25,11 @@ def update_patient_context(context: PatientContext, answer: str) -> None:
         context.narrative_themes.append("含糊")
 
 
-def reinforce_patient_context(context: PatientContext, item_contexts: Dict[int, ItemContext]) -> None:
-    """Merge long-term insights back into the short-term context between items."""
-    if not item_contexts:
+def reinforce_with_context(patient: PatientContext, item_ctx: ItemContext) -> None:
+    """Persist the current patient snapshot into a specific item context."""
+
+    if not item_ctx:
         return
-    merged_summary = " / ".join(
-        ic.summary for ic in item_contexts.values() if ic.summary
-    )[-600:]
-    if merged_summary:
-        context.conversation_summary = merged_summary
 
-    merged_themes: list[str] = []
-    for ic in item_contexts.values():
-        for theme in ic.themes:
-            if theme not in merged_themes:
-                merged_themes.append(theme)
-    if merged_themes:
-        context.narrative_themes = merged_themes
-
-    for ic in item_contexts.values():
-        if ic.facts:
-            context.structured_facts.update(ic.facts)
+    snapshot = patient.snapshot_for_item()
+    item_ctx.absorb_patient_snapshot(snapshot)

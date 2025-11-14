@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict
 
 from ..state_types import ItemContext, SessionState
+from .patient_context import reinforce_with_context
 
 
 def ensure_item_context(state: SessionState) -> ItemContext:
@@ -20,7 +21,5 @@ def finalize_item_context(state: SessionState) -> Dict[str, object]:
     ctx = state.item_contexts.get(state.index)
     if not ctx:
         return {"item_saved": False}
-    ctx.summary = state.patient_context.conversation_summary[-400:]
-    ctx.themes = list(state.patient_context.narrative_themes)
-    ctx.facts = dict(state.patient_context.structured_facts)
+    reinforce_with_context(state.patient_context, ctx)
     return {"item_saved": True, "item_id": ctx.item_id, "name": ctx.item_name}

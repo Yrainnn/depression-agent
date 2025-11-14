@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ..context.item_context import append_dialogue, ensure_item_context
-from ..context.patient_context import update_patient_context
+from ..context.patient_context import reinforce_with_context, update_patient_context
 from ..llm_tools import LLM
 from ..state_types import SessionState
 from .base_node import Node
@@ -31,7 +31,6 @@ class UpdateNode(Node):
         facts = facts_resp.get("facts") if isinstance(facts_resp, dict) else None
         if isinstance(facts, dict):
             state.patient_context.structured_facts.update(facts)
-            state.item_contexts[state.index].facts.update(facts)
 
         themes_resp = LLM.call("identify_themes", {"text": user_text}) or {}
         themes = themes_resp.get("themes") if isinstance(themes_resp, dict) else None
@@ -39,7 +38,6 @@ class UpdateNode(Node):
             for theme in themes:
                 if theme and theme not in state.patient_context.narrative_themes:
                     state.patient_context.narrative_themes.append(theme)
-            state.item_contexts[state.index].themes = list(state.patient_context.narrative_themes)
 
         summary_resp = LLM.call(
             "summarize_context",
@@ -48,7 +46,8 @@ class UpdateNode(Node):
         summary = summary_resp.get("summary") if isinstance(summary_resp, dict) else None
         if isinstance(summary, str) and summary:
             state.patient_context.conversation_summary = summary
-            state.item_contexts[state.index].summary = summary
+
+        reinforce_with_context(state.patient_context, state.item_contexts[state.index])
 
         state.waiting_for_user = False
         state.current_strategy = next_strategy or state.current_strategy

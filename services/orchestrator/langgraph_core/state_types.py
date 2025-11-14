@@ -13,6 +13,16 @@ class PatientContext:
     conversation_summary: str = ""
     active_risks: List[str] = field(default_factory=list)
 
+    def snapshot_for_item(self) -> Dict[str, Any]:
+        """Return a shallow copy of the short-term state for long-term storage."""
+
+        return {
+            "summary": self.conversation_summary,
+            "themes": list(self.narrative_themes),
+            "facts": dict(self.structured_facts),
+            "risks": list(self.active_risks),
+        }
+
     def to_prompt_snippet(self) -> str:
         """Return a concise prompt fragment for LLM question generation."""
         parts: List[str] = []
@@ -35,6 +45,28 @@ class ItemContext:
     summary: str = ""
     facts: Dict[str, Any] = field(default_factory=dict)
     themes: List[str] = field(default_factory=list)
+    risks: List[str] = field(default_factory=list)
+
+    def absorb_patient_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Merge patient short-term context into this long-term record."""
+
+        summary = snapshot.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            self.summary = summary.strip()[-400:]
+
+        facts = snapshot.get("facts")
+        if isinstance(facts, dict):
+            self.facts.update(facts)
+
+        themes = snapshot.get("themes")
+        if isinstance(themes, list):
+            ordered = list(dict.fromkeys([t for t in themes if isinstance(t, str) and t]))
+            if ordered:
+                self.themes = ordered
+
+        risks = snapshot.get("risks")
+        if isinstance(risks, list):
+            self.risks = list(dict.fromkeys([r for r in risks if isinstance(r, str) and r]))
 
 
 @dataclass

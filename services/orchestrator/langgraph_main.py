@@ -5,7 +5,6 @@ import os
 from typing import Dict, Optional
 
 from .langgraph_core.context.item_context import finalize_item_context
-from .langgraph_core.context.patient_context import reinforce_patient_context
 from .langgraph_core.graphs.main_graph import GraphRuntime
 from .langgraph_core.nodes.node_output import OutputNode
 from .langgraph_core.nodes.node_score import ScoreNode
@@ -56,7 +55,6 @@ class LangGraphCoordinator:
             self.state.completed = True
             self.score_node.run(self.state)
         else:
-            reinforce_patient_context(self.state.patient_context, self.state.item_contexts)
             self.state.current_strategy = "S2"
             self.state.current_template = None
             self.state.waiting_for_user = False
