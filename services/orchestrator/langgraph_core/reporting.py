@@ -27,22 +27,29 @@ def _prepare_per_item_scores(state: SessionState, items: List[Dict[str, Any]]) -
         item_id = _normalize_item_id(item.get("item_id"))
         if item_id is None:
             continue
-        raw = item.get("raw") or {}
         ctx = state.item_contexts.get(item_id)
+        question = (
+            item.get("question")
+            or item.get("item_name")
+            or (ctx.item_name if ctx and ctx.item_name else None)
+            or _question_for(f"H{item_id:02d}")
+        )
+        score_raw = item.get("score")
+        try:
+            score_value = float(score_raw) if score_raw is not None else None
+        except (TypeError, ValueError):
+            score_value = None
+        max_score = item.get("max_score") if isinstance(item.get("max_score"), (int, float)) else MAX_SCORE.get(item_id)
         entry: Dict[str, Any] = {
             "item_id": item_id,
-            "question": (ctx.item_name if ctx and ctx.item_name else None),
-            "score": item.get("score"),
-            "max_score": raw.get("max_score") if isinstance(raw.get("max_score"), (int, float)) else MAX_SCORE.get(item_id),
+            "question": question,
+            "score": score_value,
+            "max_score": max_score,
         }
 
-        confidence = raw.get("confidence")
-        if isinstance(confidence, (int, float)):
-            entry["confidence"] = confidence
-
-        evidence_refs = raw.get("evidence_refs")
-        if isinstance(evidence_refs, list):
-            entry["evidence_refs"] = [str(ref) for ref in evidence_refs if ref]
+        reason = item.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            entry["reason"] = reason.strip()
 
         prepared.append(entry)
     return prepared
@@ -51,7 +58,8 @@ def _prepare_per_item_scores(state: SessionState, items: List[Dict[str, Any]]) -
 def prepare_report_payload(state: SessionState) -> Optional[Dict[str, Any]]:
     analysis = state.analysis or {}
     total_block = analysis.get("total_score") or {}
-    items = total_block.get("items") or []
+    per_item_source = analysis.get("per_item_scores") or total_block.get("items") or []
+    items = per_item_source if isinstance(per_item_source, list) else []
     if not isinstance(items, list) or not items:
         return None
 
@@ -59,28 +67,42 @@ def prepare_report_payload(state: SessionState) -> Optional[Dict[str, Any]]:
     if not per_item_scores:
         return None
 
-    rationale_lines: List[str] = []
-    for item in items:
-        item_id = _normalize_item_id(item.get("item_id"))
-        if item_id is None:
-            continue
-        raw = item.get("raw") or {}
-        reason = raw.get("reason")
-        if isinstance(reason, str) and reason.strip():
-            rationale_lines.append(f"H{item_id:02d}: {reason.strip()}")
-
     payload: Dict[str, Any] = {
         "per_item_scores": per_item_scores,
-        "items": per_item_scores,
-        "total_score": total_block.get("sum"),
+        "total_score": total_block.get("sum") if isinstance(total_block, dict) else total_block,
+        "max_total": total_block.get("max") if isinstance(total_block, dict) else analysis.get("max_total"),
+        "diagnosis": analysis.get("diagnosis"),
+        "advice": analysis.get("advice"),
     }
+
+    total_value = payload.get("total_score")
+    if isinstance(total_value, (int, float)):
+        payload["total_score"] = float(total_value)
+    else:
+        computed_total = 0.0
+        for entry in per_item_scores:
+            score = entry.get("score")
+            if isinstance(score, (int, float)):
+                computed_total += float(score)
+        payload["total_score"] = round(computed_total, 2)
+
+    if not isinstance(payload.get("max_total"), (int, float)):
+        payload["max_total"] = sum(MAX_SCORE.values())
 
     summary = state.patient_context.conversation_summary
     if isinstance(summary, str) and summary.strip():
         payload["summary"] = summary.strip()
 
-    if rationale_lines:
-        payload["opinion"] = {"rationale": "\n".join(rationale_lines)}
+    rationale = analysis.get("rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        rationale_lines = [
+            f"H{entry['item_id']:02d}: {entry['reason']}"
+            for entry in per_item_scores
+            if entry.get("reason")
+        ]
+        rationale = "\n".join(rationale_lines) if rationale_lines else ""
+    if rationale:
+        payload["rationale"] = rationale
 
     return payload
 

@@ -46,6 +46,9 @@ def test_langgraph_basic_flow(patched_paths):
     assert analysis is not None
     assert analysis["total_score"]["items"][0]["item_id"] == 1
     assert analysis["total_score"]["items"][0]["score"] >= 0
+    assert analysis["per_item_scores"][0]["item_code"].startswith("H0")
+    assert analysis["diagnosis"]
+    assert analysis["advice"]
     assert final["final_message"] == "评估结束,感谢您的参与."
     assert coord.state.report_payload is not None
     assert coord.state.report_result is not None

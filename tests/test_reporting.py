@@ -10,17 +10,39 @@ def test_prepare_report_payload_collects_scores_and_reasons():
     state.analysis = {
         "total_score": {
             "sum": 3,
+            "max": 52,
             "items": [
-                {"item_id": 1, "score": 3, "raw": {"reason": "情绪明显低落"}},
+                {
+                    "item_id": 1,
+                    "item_code": "H01",
+                    "question": "抑郁情绪",
+                    "score": 3,
+                    "max_score": 4,
+                    "reason": "情绪明显低落",
+                }
             ],
-        }
+        },
+        "per_item_scores": [
+            {
+                "item_id": 1,
+                "item_code": "H01",
+                "question": "抑郁情绪",
+                "score": 3,
+                "max_score": 4,
+                "reason": "情绪明显低落",
+            }
+        ],
+        "diagnosis": "轻度抑郁",
+        "advice": "建议转介心理支持",
     }
 
     payload = prepare_report_payload(state)
 
     assert payload is not None
-    assert payload["total_score"] == 3
-    assert payload["items"][0]["item_id"] == 1
-    assert payload["items"][0]["question"] == "抑郁情绪"
+    assert payload["total_score"] == 3.0
+    assert payload["per_item_scores"][0]["item_id"] == 1
+    assert payload["per_item_scores"][0]["question"] == "抑郁情绪"
     assert payload["summary"] == "患者情绪持续低落"
-    assert "情绪明显低落" in payload["opinion"]["rationale"]
+    assert "情绪明显低落" in payload["rationale"]
+    assert payload["diagnosis"] == "轻度抑郁"
+    assert payload["advice"] == "建议转介心理支持"

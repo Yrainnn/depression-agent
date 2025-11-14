@@ -96,17 +96,33 @@ def _max_for(item_id: str) -> Optional[int]:
     return None
 
 
+def _normalize_item_index(raw_id: Any) -> Optional[int]:
+    if isinstance(raw_id, int):
+        return raw_id
+    if isinstance(raw_id, str):
+        stripped = raw_id.strip()
+        if not stripped:
+            return None
+        if stripped.upper().startswith("H") and stripped[1:].isdigit():
+            return int(stripped[1:])
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
 def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
     normalized: Dict[str, Dict[str, Any]] = {}
     for item in raw_scores or []:
         if not isinstance(item, dict):
             continue
-        item_id = str(item.get("item_id") or item.get("name") or "")
-        if not item_id:
+        raw_item_id = item.get("item_id") or item.get("name") or item.get("item_code")
+        numeric_id = _normalize_item_index(raw_item_id)
+        if numeric_id is None:
             continue
+        key = f"H{numeric_id:02d}"
+        score_raw = item.get("score")
         try:
-            score_value = item.get("score")
-            score_value = float(score_value) if score_value is not None else None
+            score_value = float(score_raw) if score_raw is not None else None
         except (TypeError, ValueError):
             score_value = None
         confidence = item.get("confidence") or item.get("confidence_score")
@@ -120,18 +136,21 @@ def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> Dict[str, Dict[str,
             evidence_refs = [str(evidence_refs)]
         max_score = item.get("max_score")
         if not isinstance(max_score, (int, float)):
-            fallback = _max_for(item_id)
-            if fallback is not None:
-                max_score = fallback
-            else:
-                max_score = None
-        normalized[item_id] = {
-            "item_id": item_id,
-            "question": item.get("question") or _question_for(item_id),
+            fallback = _max_for(key)
+            max_score = fallback if fallback is not None else None
+        reason = item.get("reason")
+        if isinstance(reason, str):
+            reason = reason.strip()
+        else:
+            reason = ""
+        normalized[key] = {
+            "item_id": key,
+            "question": item.get("question") or item.get("item_name") or _question_for(key),
             "score": score_value,
             "confidence": confidence,
             "max_score": max_score,
             "evidence_refs": [str(ref) for ref in evidence_refs if ref],
+            "reason": reason,
         }
     return normalized
 
@@ -148,6 +167,7 @@ def _expand_scores(per_item: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
             "score_display": "—",
             "confidence": None,
             "evidence_refs": [],
+            "reason": "",
         }
         data = per_item.get(key) or per_item.get(str(idx))
         if data:
@@ -161,13 +181,20 @@ def _expand_scores(per_item: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
             refs = data.get("evidence_refs") or []
             if isinstance(refs, list):
                 base["evidence_refs"] = [str(ref) for ref in refs if ref]
+            reason = data.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                base["reason"] = reason.strip()
         rows.append(base)
     return rows
 
 
 def _compute_total_score(expanded_scores: List[Dict[str, Any]], score_json: Dict[str, Any]) -> float:
     total = score_json.get("total_score")
-    if isinstance(total, (int, float)):
+    if isinstance(total, dict):
+        value = total.get("sum")
+        if isinstance(value, (int, float)):
+            return float(value)
+    elif isinstance(total, (int, float)):
         return float(total)
     accum = 0.0
     for item in expanded_scores:
@@ -255,26 +282,33 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
     )
     expanded_scores = _expand_scores(per_item_map)
 
-    summary = score_json.get("summary")
+    summary = score_json.get("summary") or ""
     opinion = score_json.get("opinion") if isinstance(score_json.get("opinion"), dict) else {}
     if not summary:
         summary = opinion.get("summary") or opinion.get("overall") or ""
-    rationale = opinion.get("rationale") if isinstance(opinion, dict) else ""
+    rationale = score_json.get("rationale") or opinion.get("rationale") or ""
 
     total_score = _compute_total_score(expanded_scores, score_json)
-    # === 新增诊断逻辑 ===
-    if total_score <= 7:
-        diagnosis = "无抑郁症状"
-        advice = "情绪状态良好，无明显抑郁表现。建议保持规律作息与积极生活方式。"
-    elif total_score <= 16:
-        diagnosis = "轻度抑郁"
-        advice = "出现轻度情绪低落，建议适度休息、增加社交活动，并考虑心理疏导。"
-    elif total_score <= 23:
-        diagnosis = "中度抑郁"
-        advice = "表现出明显抑郁特征，建议及时寻求心理咨询或医生指导。"
-    else:
-        diagnosis = "重度抑郁"
-        advice = "存在严重抑郁表现，建议尽快就医，进行专业评估与治疗。"
+    max_total = score_json.get("max_total")
+    if not isinstance(max_total, (int, float)):
+        max_total = HAMD_TOTAL
+
+    diagnosis = score_json.get("diagnosis")
+    advice = score_json.get("advice")
+
+    if not isinstance(diagnosis, str) or not diagnosis.strip() or not isinstance(advice, str) or not advice.strip():
+        if total_score <= 7:
+            diagnosis = "无抑郁症状"
+            advice = "情绪状态良好，无明显抑郁表现。建议保持规律作息与积极生活方式。"
+        elif total_score <= 16:
+            diagnosis = "轻度抑郁"
+            advice = "出现轻度情绪低落，建议适度休息、增加社交活动，并考虑心理疏导。"
+        elif total_score <= 23:
+            diagnosis = "中度抑郁"
+            advice = "表现出明显抑郁特征，建议及时寻求心理咨询或医生指导。"
+        else:
+            diagnosis = "重度抑郁"
+            advice = "存在严重抑郁表现，建议尽快就医，进行专业评估与治疗。"
     risk_events = _prepare_risk_events(repo, sid)
     has_scores = any(isinstance(item.get("score"), (int, float)) for item in expanded_scores)
 
@@ -285,7 +319,7 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
         "summary": summary,
         "rationale": rationale,
         "total_score": total_score,
-        "max_total": HAMD_TOTAL,
+        "max_total": max_total,
         "expanded_scores": expanded_scores,
         "risk_events": risk_events,
         "has_scores": has_scores,
@@ -347,6 +381,7 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
                         <th>题干</th>
                         <th>分数</th>
                         <th>上限</th>
+                        <th>评分理由</th>
                         <th>置信度</th>
                         <th>证据引用</th>
                     </tr>
@@ -358,6 +393,7 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
                         <td>{{ item.question }}</td>
                         <td>{{ item.score_display }}</td>
                         <td>{{ item.max_score }}</td>
+                        <td>{{ item.reason or '—' }}</td>
                         <td>{{ item.confidence or '—' }}</td>
                         <td>{{ item.evidence_refs | join(', ') if item.evidence_refs else '—' }}</td>
                     </tr>

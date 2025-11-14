@@ -37,7 +37,13 @@ def test_score_node_runs_in_parallel(monkeypatch):
     node = ScoreNode("score", max_workers=4)
     result = node.run(state)
 
-    assert result["analysis"]["total_score"]["sum"] == sum(range(1, 5))
+    analysis = result["analysis"]
+    assert analysis["total_score"]["sum"] == sum(range(1, 5))
+    assert analysis["total_score"]["items"][0]["item_id"] == 1
+    assert analysis["per_item_scores"][0]["item_code"] == "H01"
+    assert analysis["per_item_scores"][0]["question"] == "Item 1"
+    assert analysis["diagnosis"] == "轻度抑郁"
+    assert analysis["advice"]
     # 至少启用了三个不同的工作线程
     worker_threads = {name for name in threads_used if "ThreadPoolExecutor" in name}
     assert len(worker_threads) >= 3
