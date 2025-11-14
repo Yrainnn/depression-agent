@@ -90,6 +90,20 @@ def _normalize_item_index(raw_id: Any) -> Optional[int]:
     return None
 
 
+def _normalize_item_index(raw_id: Any) -> Optional[int]:
+    if isinstance(raw_id, int):
+        return raw_id
+    if isinstance(raw_id, str):
+        stripped = raw_id.strip()
+        if not stripped:
+            return None
+        if stripped.upper().startswith("H") and stripped[1:].isdigit():
+            return int(stripped[1:])
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
 def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
     normalized: Dict[str, Dict[str, Any]] = {}
     for item in raw_scores or []:
