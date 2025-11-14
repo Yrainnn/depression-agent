@@ -83,6 +83,8 @@ class SessionState:
     current_template: Optional[Dict[str, Any]] = None
     current_branches: List[Dict[str, Any]] = field(default_factory=list)
     analysis: Optional[Dict[str, Any]] = None
+    report_payload: Optional[Dict[str, Any]] = None
+    report_result: Optional[Dict[str, Any]] = None
     last_agent_text: str = ""
     last_user_text: str = ""
     branch_history: List[str] = field(default_factory=list)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Dict
 
 import pytest
 
@@ -13,10 +14,19 @@ def patched_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     snap_dir = tmp_path / "snaps"
     monkeypatch.setattr(coordinator_module, "_LOG_PATH", str(log_path))
     monkeypatch.setattr(coordinator_module, "_SNAPSHOT_DIR", str(snap_dir))
-    return log_path, snap_dir
+    reports: list[Dict[str, Any]] = []
+
+    def _fake_build_pdf(sid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        stub = {"report_url": f"file://{sid}.pdf", "payload": payload}
+        reports.append(stub)
+        return stub
+
+    monkeypatch.setattr(coordinator_module, "build_pdf", _fake_build_pdf)
+    return log_path, snap_dir, reports
 
 
 def test_langgraph_basic_flow(patched_paths):
+    _, _, reports = patched_paths
     coord = coordinator_module.LangGraphCoordinator(total_items=1, template_dir="services/orchestrator/config")
     first = coord.step(role="agent")
     assert first["waiting_for_user"] is True
@@ -36,6 +46,15 @@ def test_langgraph_basic_flow(patched_paths):
     assert analysis is not None
     assert analysis["total_score"]["items"][0]["item_id"] == 1
     assert analysis["total_score"]["items"][0]["score"] >= 0
+    assert analysis["per_item_scores"][0]["item_code"].startswith("H0")
+    assert analysis["diagnosis"]
+    assert analysis["advice"]
+    assert final["final_message"] == "评估结束,感谢您的参与."
+    assert coord.state.report_payload is not None
+    assert coord.state.report_result is not None
+    assert final.get("report_generated") is True
+    assert final.get("report_url") == "file://" + coord.state.sid + ".pdf"
+    assert reports and reports[0]["report_url"] == "file://" + coord.state.sid + ".pdf"
 
 
 def test_risk_gate_triggers(patched_paths):
