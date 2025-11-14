@@ -19,7 +19,14 @@ class UpdateNode(Node):
         user_text = str(kwargs.get("user_text") or "")
         branch = kwargs.get("branch")
         next_strategy = kwargs.get("next_strategy") or state.current_strategy
+        if isinstance(next_strategy, str):
+            next_strategy = next_strategy.strip()
         if not user_text:
+            if next_strategy and isinstance(next_strategy, str):
+                state.current_strategy = next_strategy
+                if next_strategy == "END":
+                    state.completed = True
+                    state.waiting_for_user = False
             return {"branch": branch, "next_strategy": next_strategy}
 
         ensure_item_context(state)
@@ -50,5 +57,8 @@ class UpdateNode(Node):
         reinforce_with_context(state.patient_context, state.item_contexts[state.index])
 
         state.waiting_for_user = False
-        state.current_strategy = next_strategy or state.current_strategy
-        return {"branch": branch, "next_strategy": next_strategy}
+        if isinstance(next_strategy, str) and next_strategy:
+            state.current_strategy = next_strategy
+        if state.current_strategy == "END":
+            state.completed = True
+        return {"branch": branch, "next_strategy": next_strategy, "completed": state.completed}

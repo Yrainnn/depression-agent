@@ -20,6 +20,25 @@ class InitNode(Node):
         state.current_template = template
         state.current_item_name = template.get("project_name", f"item_{state.index}")
         ensure_item_context(state)
-        if not state.current_strategy:
+
+        state.strategy_sequence = []
+        state.strategy_graph = {}
+        state.strategy_map = {}
+        state.default_next_strategy = ""
+        state.strategy_prompt_overrides.clear()
+        state.current_branches = []
+        state.pending_strategy = ""
+        state.clarify_attempts.clear()
+
+        first_strategy = ""
+        for entry in template.get("strategies", []) or []:
+            if isinstance(entry, dict):
+                sid = entry.get("id")
+                if isinstance(sid, str) and sid.strip():
+                    first_strategy = sid.strip()
+                    break
+        if first_strategy:
+            state.current_strategy = first_strategy
+        elif not state.current_strategy:
             state.current_strategy = "S2"
         return {"item_name": state.current_item_name}
