@@ -61,22 +61,38 @@ class _FallbackBackend(_BaseBackend):
         if func == "clarify_branch":
             answer = payload.get("answer", "")
             branches = payload.get("branches", []) or []
-            for branch in branches:
-                condition = branch.get("condition", "")
-                if any(token in answer for token in ("没有", "不", "偶尔", "说不清")) and "否定" in condition:
-                    return {
-                        "matched": condition,
-                        "next": branch.get("next"),
-                        "reason": "回答包含否定语气",
-                    }
+            if any(token in answer for token in ("没有", "不", "偶尔", "说不清", "否认", "没觉得")):
+                for branch in branches:
+                    if "否定" in str(branch.get("condition", "")):
+                        return {
+                            "matched": branch.get("condition"),
+                            "next": branch.get("next"),
+                            "reason": "fallback_negative_match",
+                            "clarify": False,
+                        }
             if branches:
                 branch = branches[0]
                 return {
                     "matched": branch.get("condition"),
                     "next": branch.get("next"),
-                    "reason": "默认选择首分支",
+                    "reason": "fallback_default_branch",
+                    "clarify": False,
                 }
-            return {"matched": None, "next": None, "reason": "无可用分支"}
+            return {
+                "matched": None,
+                "next": None,
+                "clarify": True,
+                "clarify_question": "能再具体描述一下你的感受吗？",
+                "reason": "fallback_no_branch",
+            }
+        if func == "clarify_question":
+            template = (payload.get("template") or "可以再详细描述一下吗？").strip()
+            for prefix in ("请简单描述", "请描述", "请简要描述", "请", "请问"):
+                if template.startswith(prefix):
+                    template = template[len(prefix) :].strip()
+                    break
+            template = template.strip("？?。:：") or "情况"
+            return {"question": f"是否可以具体说明{template}？"}
         raise ValueError(f"Unknown tool function: {func}")
 
 
@@ -102,6 +118,34 @@ class _DeepSeekBackend(_BaseBackend):
             return json.loads(content)
         except Exception:
             return {}
+
+    def _handle_clarify_branch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = get_prompt("branch_clarification").format(
+            answer=payload.get("answer", ""),
+            branches=json.dumps(payload.get("branches", []), ensure_ascii=False),
+        )
+        result = self._chat_json(prompt)
+        if result and not result.get("clarify"):
+            return result
+        if result and result.get("clarify") and result.get("clarify_question"):
+            return result
+        question = self._handle_clarify_question(payload)
+        if isinstance(question, dict) and question.get("question"):
+            result = result or {}
+            result["clarify"] = True
+            result["clarify_question"] = question["question"]
+        return result
+
+    def _handle_clarify_question(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = get_prompt("clarify_question").format(
+            context=payload.get("context", ""),
+            template=payload.get("template", ""),
+            answer=payload.get("answer", ""),
+        )
+        result = self._chat_json(prompt)
+        if isinstance(result, dict) and result.get("question"):
+            return result
+        return {"question": payload.get("template", "能再详细说明一下吗？")}
 
     def call(self, func: str, payload: Dict[str, Any]) -> Any:
         if not self.client or not getattr(self.client, "usable", lambda: False)():
@@ -134,17 +178,17 @@ class _DeepSeekBackend(_BaseBackend):
             if func == "risk_detect":
                 prompt = get_prompt("risk_detection").format(text=payload.get("text", ""))
                 return self._chat_json(prompt)
-            if func == "extract_facts":
+            elif func == "extract_facts":
                 prompt = get_prompt("fact_extraction").format(text=payload.get("text", ""))
                 return self._chat_json(prompt)
-            if func == "identify_themes":
+            elif func == "identify_themes":
                 vocab = payload.get(
                     "vocab",
                     "失落,罪恶,绝望,焦虑,兴趣缺失,睡眠异常,食欲改变,精力下降,自责,无价值感",
                 )
                 prompt = get_prompt("theme_identification").format(vocab=vocab, text=payload.get("text", ""))
                 return self._chat_json(prompt)
-            if func == "summarize_context":
+            elif func == "summarize_context":
                 prompt = get_prompt("rolling_summary").format(
                     prev=payload.get("prev", ""),
                     new=payload.get("new", ""),
@@ -156,7 +200,7 @@ class _DeepSeekBackend(_BaseBackend):
                     if isinstance(summary, str):
                         result["summary"] = summary[:limit]
                 return result
-            if func == "score_item":
+            elif func == "score_item":
                 prompt = get_prompt("single_item_scoring").format(
                     item_name=payload.get("item_name", ""),
                     facts=json.dumps(payload.get("facts", {}), ensure_ascii=False),
@@ -167,12 +211,10 @@ class _DeepSeekBackend(_BaseBackend):
                     dialogue=payload.get("dialogue", ""),
                 )
                 return self._chat_json(prompt, max_tokens=256)
-            if func == "clarify_branch":
-                prompt = get_prompt("branch_clarification").format(
-                    answer=payload.get("answer", ""),
-                    branches=json.dumps(payload.get("branches", []), ensure_ascii=False),
-                )
-                return self._chat_json(prompt)
+            elif func == "clarify_branch":
+                return self._handle_clarify_branch(payload)
+            elif func == "clarify_question":
+                return self._handle_clarify_question(payload)
         except Exception:
             return _FallbackBackend().call(func, payload)
 
@@ -190,6 +232,9 @@ class LLMToolBox:
             self.backend = _FallbackBackend()
 
     def call(self, tool_name: str, payload: Dict[str, Any]) -> Any:
+        if isinstance(self.backend, _DeepSeekBackend) and tool_name in {"clarify_branch", "clarify_question"}:
+            handler = getattr(self.backend, f"_handle_{tool_name}")
+            return handler(payload)
         return self.backend.call(tool_name, payload)
 
 

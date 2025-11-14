@@ -60,7 +60,14 @@ def test_toolbox_fallback_branch(monkeypatch: pytest.MonkeyPatch):
     ]
     clarified = toolbox.call("clarify_branch", {"answer": "没有太大影响", "branches": branches})
     assert clarified["next"] == "S10"
-    assert "否定" in clarified["reason"]
+    assert clarified.get("clarify") is False
+    assert "fallback" in clarified["reason"]
+
+    clarify_question = toolbox.call(
+        "clarify_question",
+        {"context": "测试摘要", "template": "请描述感受", "answer": "说不清"},
+    )
+    assert "question" in clarify_question
 
 
 def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
@@ -71,7 +78,14 @@ def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
         {"themes": ["绝望"]},
         {"summary": "旧摘要与新内容合并后的结果应被截断"},
         {"score": 3, "reason": "模型判断"},
-        {"matched": "否定或含糊", "next": "S10", "reason": "LLM 判断"},
+        {
+            "matched": "否定或含糊",
+            "next": None,
+            "clarify": True,
+            "clarify_question": "能再详细说说吗？",
+            "reason": "LLM 判断不明确",
+        },
+        {"question": "是否可以具体说明影响？"},
     ]
     chat_calls: List[Dict[str, Any]] = []
 
@@ -139,8 +153,15 @@ def test_toolbox_deepseek_backend(monkeypatch: pytest.MonkeyPatch):
         },
     )
     assert clarified["matched"] == "否定或含糊"
-    assert clarified["next"] == "S10"
+    assert clarified["clarify"] is True
+    assert clarified["clarify_question"] == "能再详细说说吗？"
 
-    # 前六次调用依次对应 risk/facts/themes/summary/score/clarify
-    assert len(chat_calls) == 6
+    follow_up = toolbox.call(
+        "clarify_question",
+        {"context": "示例上下文", "template": "请描述影响", "answer": "不太确定"},
+    )
+    assert follow_up["question"] == "是否可以具体说明影响？"
+
+    # 前七次调用依次对应 risk/facts/themes/summary/score/clarify/clarify_question
+    assert len(chat_calls) == 7
     assert chat_calls[3]["max_tokens"] == 512

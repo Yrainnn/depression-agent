@@ -19,8 +19,15 @@ class UpdateNode(Node):
         user_text = str(kwargs.get("user_text") or "")
         branch = kwargs.get("branch")
         next_strategy = kwargs.get("next_strategy") or state.current_strategy
+        clarify = bool(kwargs.get("clarify"))
+        clarify_question = kwargs.get("clarify_question")
         if not user_text:
-            return {"branch": branch, "next_strategy": next_strategy}
+            return {
+                "branch": branch,
+                "next_strategy": next_strategy,
+                "clarify": clarify,
+                "clarify_question": clarify_question,
+            }
 
         ensure_item_context(state)
         append_dialogue(state, "user", user_text)
@@ -49,6 +56,23 @@ class UpdateNode(Node):
 
         reinforce_with_context(state.patient_context, state.item_contexts[state.index])
 
+        if clarify and isinstance(clarify_question, str) and clarify_question.strip():
+            question = clarify_question.strip()
+            append_dialogue(state, "agent", question)
+            state.last_agent_text = question
+            state.waiting_for_user = True
+            return {
+                "branch": branch,
+                "next_strategy": state.current_strategy,
+                "clarify": True,
+                "ask": question,
+                "clarify_question": question,
+            }
+
         state.waiting_for_user = False
         state.current_strategy = next_strategy or state.current_strategy
-        return {"branch": branch, "next_strategy": next_strategy}
+        return {
+            "branch": branch,
+            "next_strategy": state.current_strategy,
+            "clarify": False,
+        }

@@ -24,10 +24,19 @@ def test_langgraph_basic_flow(patched_paths):
 
     answer = "最近心情很低落，凌晨会醒来，我给自己打7分"
     second = coord.step(role="user", text=answer)
-    assert second["branch"] in {None, "明确存在抑郁情绪"}
+    assert "branch" in second
+    assert second.get("clarify") in {True, False}
 
-    third = coord.step(role="agent")
-    assert third["ask"]
+    if second.get("clarify"):
+        assert second.get("ask")
+        clarified = coord.step(role="user", text="是的，我就是觉得很难受")
+        assert clarified.get("clarify") is False
+        assert clarified.get("next_strategy")
+        follow = coord.step(role="agent")
+        assert follow.get("ask")
+    else:
+        follow = coord.step(role="agent")
+        assert follow.get("ask")
 
     final = coord.next_item()
     assert final["event"] == "next_item"

@@ -32,8 +32,10 @@ class StrategySubgraph:
             payload.update(result)
         else:
             clarify = self.clarify_node.run(session, user_text=text)
-            payload.update({k: v for k, v in clarify.items() if v is not None})
+            payload.update(clarify)
             update = self.update_node.run(session, user_text=text, **clarify)
             payload.update(update)
+            if payload.get("clarify_question") is None:
+                payload.pop("clarify_question", None)
         graph_state["payload"] = payload
         return graph_state
