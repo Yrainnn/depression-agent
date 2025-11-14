@@ -12,6 +12,10 @@ from services.tts.tts_adapter import TTSAdapter
 
 from ..media import build_media_payload
 
+from services.orchestrator.prompts.strategy_descriptions import (
+    STRATEGY_DESCRIPTIONS,
+)
+
 from ..context.item_context import append_dialogue, ensure_item_context
 from ..llm_tools import GenerateTool, LLM
 from ..state_types import SessionState
