@@ -77,6 +77,29 @@ class _FallbackBackend(_BaseBackend):
                     "reason": "默认选择首分支",
                 }
             return {"matched": None, "next": None, "reason": "无可用分支"}
+        if func == "match_condition":
+            condition = str(payload.get("condition") or "")
+            answer = str(payload.get("answer") or "")
+            lowered = condition.lower()
+            if not condition.strip() or not answer.strip():
+                return {"match": False}
+            if any(keyword in lowered for keyword in ("肯定", "存在", "明确", "抑郁", "阳性")):
+                positive_tokens = ["抑郁", "低落", "难过", "情绪不好", "沮丧", "不好"]
+                positive_tokens.extend(["有", "经常", "总是", "大部分", "明显", "非常"])
+                return {
+                    "match": any(token in answer for token in positive_tokens)
+                    and not any(token in answer for token in ("没有", "不", "未", "无"))
+                }
+            if any(keyword in lowered for keyword in ("否", "含糊", "模糊", "不清", "拒绝")):
+                negative_tokens = ["没有", "不", "未", "无", "偶尔", "说不清", "一般", "否认", "否定", "含糊"]
+                return {"match": any(token in answer for token in negative_tokens)}
+            if any(keyword in lowered for keyword in ("昼夜", "波动", "早醒", "晚", "早上", "晚上")):
+                oscillation_tokens = ["早上", "晚上", "白天", "夜里", "早醒", "凌晨"]
+                return {"match": any(token in answer for token in oscillation_tokens)}
+            tokens = [token for token in condition.replace("、", " ").replace("或", " ").split() if len(token) > 1]
+            if not tokens:
+                tokens = [condition]
+            return {"match": any(token in answer for token in tokens)}
         raise ValueError(f"Unknown tool function: {func}")
 
 
@@ -170,6 +193,12 @@ class _DeepSeekBackend(_BaseBackend):
                 prompt = get_prompt("branch_clarification").format(
                     answer=payload.get("answer", ""),
                     branches=json.dumps(payload.get("branches", []), ensure_ascii=False),
+                )
+                return self._chat_json(prompt)
+            if func == "match_condition":
+                prompt = get_prompt("condition_match").format(
+                    answer=payload.get("answer", ""),
+                    condition=payload.get("condition", ""),
                 )
                 return self._chat_json(prompt)
         except Exception:

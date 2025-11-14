@@ -86,6 +86,14 @@ class SessionState:
     last_agent_text: str = ""
     last_user_text: str = ""
     branch_history: List[str] = field(default_factory=list)
+    strategy_sequence: List[str] = field(default_factory=list)
+    strategy_graph: Dict[str, List[Dict[str, str]]] = field(default_factory=dict)
+    strategy_map: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    default_next_strategy: str = ""
+    strategy_prompt_overrides: Dict[str, str] = field(default_factory=dict)
+    pending_strategy: str = ""
+    clarify_attempts: Dict[str, int] = field(default_factory=dict)
+    max_clarify_attempts: int = 2
 
     def as_dict(self) -> Dict[str, Any]:
         data = asdict(self)

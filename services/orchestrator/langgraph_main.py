@@ -55,9 +55,17 @@ class LangGraphCoordinator:
             self.state.completed = True
             self.score_node.run(self.state)
         else:
-            self.state.current_strategy = "S2"
+            self.state.current_strategy = ""
             self.state.current_template = None
             self.state.waiting_for_user = False
+            self.state.strategy_sequence = []
+            self.state.strategy_graph = {}
+            self.state.strategy_map = {}
+            self.state.default_next_strategy = ""
+            self.state.strategy_prompt_overrides.clear()
+            self.state.current_branches = []
+            self.state.pending_strategy = ""
+            self.state.clarify_attempts.clear()
 
         record = {
             "sid": self.state.sid,
