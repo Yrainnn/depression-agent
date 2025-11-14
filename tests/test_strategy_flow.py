@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from unittest.mock import patch
+
+from services.orchestrator.langgraph_core.llm_tools import (
+    ClarifyBranchTool,
+    GenerateTool,
+    MatchConditionTool,
+)
 from services.orchestrator.langgraph_core.nodes.node_clarify import ClarifyNode
 from services.orchestrator.langgraph_core.nodes.node_strategy import StrategyNode
 from services.orchestrator.langgraph_core.nodes.node_update import UpdateNode
@@ -129,6 +135,7 @@ def test_clarify_retries_then_falls_back_to_default():
     state.max_clarify_attempts = 2
     strategy_node = StrategyNode("strategy")
     clarify_node = ClarifyNode("clarify")
+    update_node = UpdateNode("update")
 
     clarify_responses = iter(
         [
@@ -137,13 +144,13 @@ def test_clarify_retries_then_falls_back_to_default():
         ]
     )
 
-    def fake_call(func: str, payload: dict) -> dict:
-        if func == "generate":
+    def fake_call(tool, payload: dict) -> dict:
+        if tool is GenerateTool:
             template_text = payload.get("template", "")
             return {"text": template_text}
-        if func == "clarify_branch":
+        if tool is ClarifyBranchTool:
             return next(clarify_responses)
-        if func == "match_condition":
+        if tool is MatchConditionTool:
             condition = payload.get("condition", "")
             answer = payload.get("answer", "")
             if "肯定" in condition:
@@ -169,8 +176,12 @@ def test_clarify_retries_then_falls_back_to_default():
         assert "S1" not in state.strategy_prompt_overrides
 
         clarify_second = clarify_node.run(state, user_text="还是说不清")
-        assert clarify_second["next_strategy"] == "S2"
+        assert clarify_second["next_strategy"] == "END"
         assert clarify_second["clarify_reason"] == "clarify_limit"
-        assert state.current_strategy == "S2"
-        assert state.strategy_graph["S1"] == [{"to": "S2", "condition": "clarify_limit"}]
+        assert state.strategy_graph["S1"] == [{"to": "END", "condition": "clarify_limit"}]
         assert "S1" not in state.clarify_attempts
+
+        update_result = update_node.run(state, user_text="还是说不清", **clarify_second)
+        assert update_result["next_strategy"] == "END"
+        assert state.current_strategy == "END"
+        assert state.completed is True

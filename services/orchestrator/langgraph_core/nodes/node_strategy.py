@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from services.orchestrator.prompts.strategy_descriptions import (
+    STRATEGY_DESCRIPTIONS,
+)
+
 from ..context.item_context import append_dialogue, ensure_item_context
-from ..llm_tools import LLM
+from ..llm_tools import GenerateTool, LLM
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -13,6 +17,7 @@ class StrategyNode(Node):
 
     def __init__(self, name: str):
         super().__init__(name)
+        self._strategy_descriptions = STRATEGY_DESCRIPTIONS
 
     def _build_strategy_graph(self, state: SessionState, template: Dict[str, Any]) -> None:
         raw_strategies = template.get("strategies", []) or []
@@ -111,6 +116,33 @@ class StrategyNode(Node):
             template_text = override or cfg.get("template") or "请结合上下文提出问题。"
             template_text = str(template_text).strip() or "请结合上下文提出问题。"
 
+            if isinstance(state.current_strategy, str):
+                strategy_meta = self._strategy_descriptions.get(state.current_strategy)
+            else:
+                strategy_meta = None
+
+            if strategy_meta:
+                context_lines: List[str] = ["当前策略说明："]
+                name = strategy_meta.get("name")
+                if isinstance(name, str) and name.strip():
+                    context_lines.append(f"- 策略名称：{name.strip()}")
+                description = strategy_meta.get("description")
+                if isinstance(description, str) and description.strip():
+                    context_lines.append(f"- 策略目标：{description.strip()}")
+                tone = strategy_meta.get("tone")
+                if isinstance(tone, str) and tone.strip():
+                    context_lines.append(f"- 交流语气：{tone.strip()}")
+                additional = [
+                    (key, value)
+                    for key, value in strategy_meta.items()
+                    if key not in {"name", "description", "tone"}
+                ]
+                for key, value in additional:
+                    if isinstance(value, str) and value.strip():
+                        context_lines.append(f"- {key}：{value.strip()}")
+                strategy_context = "\n".join(context_lines)
+                template_text = f"{strategy_context}\n\n{template_text}".strip()
+
             ensure_item_context(state)
             state.pending_strategy = state.current_strategy
             payload = {
@@ -119,7 +151,7 @@ class StrategyNode(Node):
                 "dialogue": state.item_contexts[state.index].dialogue,
                 "progress": {"index": state.index, "total": state.total},
             }
-            result = LLM.call("generate", payload) or {}
+            result = LLM.call(GenerateTool, payload) or {}
             question = result.get("text") or template_text
             question = str(question).strip()
             if question:
