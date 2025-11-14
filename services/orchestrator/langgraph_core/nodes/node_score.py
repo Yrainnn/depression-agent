@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..llm_tools import LLM
+from ..llm_tools import LLM, ScoreItemTool
 from ..state_types import SessionState
 from .base_node import Node
 
@@ -24,7 +24,7 @@ class ScoreNode(Node):
                 "dialogue": ctx.dialogue,
                 "risks": ctx.risks,
             }
-            result = LLM.call("score_item", payload) or {}
+            result = LLM.call(ScoreItemTool, payload) or {}
             score = result.get("score", 0)
             items.append({"item_id": item_id, "score": score, "raw": result})
         state.analysis = {"total_score": {"sum": sum(item["score"] for item in items), "items": items}}

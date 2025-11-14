@@ -28,8 +28,6 @@ class Settings(BaseSettings):
     enable_ds_controller: bool = Field(True, alias="ENABLE_DS_CONTROLLER")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     deepseek_chat_timeout: float = Field(90.0, alias="DEEPSEEK_CHAT_TIMEOUT")
-    deepseek_clarify_timeout: float = Field(60.0, alias="DEEPSEEK_CLARIFY_TIMEOUT")
-    deepseek_controller_timeout: float = Field(90.0, alias="DEEPSEEK_CONTROLLER_TIMEOUT")
     oss_endpoint: Optional[str] = Field(None, alias="OSS_ENDPOINT")
     oss_bucket: Optional[str] = Field(None, alias="OSS_BUCKET")
     oss_prefix: str = Field("", alias="OSS_PREFIX")
@@ -92,7 +90,7 @@ class Settings(BaseSettings):
     @property
     def ALIBABA_CLOUD_ACCESS_KEY_SECRET(self) -> Optional[str]:
         return self.alibaba_cloud_access_key_secret
-        
+
     @property
     def TINGWU_APPKEY(self) -> Optional[str]:
         return self.tingwu_appkey or self.alibaba_tingwu_appkey
@@ -122,36 +120,24 @@ class Settings(BaseSettings):
         return self.tingwu_lang
 
     @property
-    def OSS_REGION(self) -> Optional[str]:
-        return self.oss_region
-
-    @property
-    def OSS_ENDPOINT(self) -> Optional[str]:
-        return self.oss_endpoint
-
-    @property
-    def OSS_BUCKET(self) -> Optional[str]:
-        return self.oss_bucket
-
-    @property
-    def OSS_KEY_PREFIX(self) -> str:
-        return self.oss_key_prefix
-
-    @property
-    def ALIBABA_CLOUD_ACCESS_KEY_ID(self) -> Optional[str]:
-        return self.alibaba_cloud_access_key_id
-
-    @property
-    def ALIBABA_CLOUD_ACCESS_KEY_SECRET(self) -> Optional[str]:
-        return self.alibaba_cloud_access_key_secret
-
-    @property
     def DEEPSEEK_API_BASE(self) -> Optional[str]:
         return self.deepseek_api_base
 
     @property
     def DEEPSEEK_API_KEY(self) -> Optional[str]:
         return self.deepseek_api_key
+
+    @property
+    def DEEPSEEK_CHAT_TIMEOUT(self) -> float:
+        return self.deepseek_chat_timeout
+
+    @property
+    def LOG_LEVEL(self) -> str:
+        return self.log_level
+
+    @property
+    def ENABLE_DS_CONTROLLER(self) -> bool:
+        return self.enable_ds_controller
 
     @property
     def DASHSCOPE_API_KEY(self) -> Optional[str]:
@@ -186,24 +172,8 @@ class Settings(BaseSettings):
         return self.prompt_clarify_cn_path
 
     @property
-    def ENABLE_DS_CONTROLLER(self) -> bool:
-        return self.enable_ds_controller
-
-    @property
-    def DEEPSEEK_CHAT_TIMEOUT(self) -> float:
-        return self.deepseek_chat_timeout
-
-    @property
-    def LOG_LEVEL(self) -> str:
-        return self.log_level
-
-    @property
-    def DEEPSEEK_CLARIFY_TIMEOUT(self) -> float:
-        return self.deepseek_clarify_timeout
-
-    @property
-    def DEEPSEEK_CONTROLLER_TIMEOUT(self) -> float:
-        return self.deepseek_controller_timeout
+    def OSS_REGION(self) -> Optional[str]:
+        return self.oss_region
 
     @property
     def OSS_ENDPOINT(self) -> Optional[str]:
@@ -218,8 +188,8 @@ class Settings(BaseSettings):
         return self.oss_prefix
 
     @property
-    def OSS_REGION(self) -> Optional[str]:
-        return self.oss_region
+    def OSS_KEY_PREFIX(self) -> str:
+        return self.oss_key_prefix
 
     @property
     def OSS_ACCESS_KEY_ID(self) -> Optional[str]:
