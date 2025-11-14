@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
+
+from services.orchestrator.langgraph_core.llm_tools import (
+    ClarifyBranchTool,
+    GenerateTool,
+    MatchConditionTool,
+)
 from services.orchestrator.langgraph_core.nodes.node_clarify import ClarifyNode
 from services.orchestrator.langgraph_core.nodes.node_strategy import StrategyNode
 from services.orchestrator.langgraph_core.nodes.node_update import UpdateNode
@@ -129,6 +136,7 @@ def test_clarify_retries_then_falls_back_to_default():
     state.max_clarify_attempts = 2
     strategy_node = StrategyNode("strategy")
     clarify_node = ClarifyNode("clarify")
+    update_node = UpdateNode("update")
 
     clarify_responses = iter(
         [
@@ -137,13 +145,13 @@ def test_clarify_retries_then_falls_back_to_default():
         ]
     )
 
-    def fake_call(func: str, payload: dict) -> dict:
-        if func == "generate":
+    def fake_call(tool, payload: dict) -> dict:
+        if tool is GenerateTool:
             template_text = payload.get("template", "")
             return {"text": template_text}
-        if func == "clarify_branch":
+        if tool is ClarifyBranchTool:
             return next(clarify_responses)
-        if func == "match_condition":
+        if tool is MatchConditionTool:
             condition = payload.get("condition", "")
             answer = payload.get("answer", "")
             if "肯定" in condition:
@@ -169,8 +177,59 @@ def test_clarify_retries_then_falls_back_to_default():
         assert "S1" not in state.strategy_prompt_overrides
 
         clarify_second = clarify_node.run(state, user_text="还是说不清")
-        assert clarify_second["next_strategy"] == "S2"
+        assert clarify_second["next_strategy"] == "END"
         assert clarify_second["clarify_reason"] == "clarify_limit"
-        assert state.current_strategy == "S2"
-        assert state.strategy_graph["S1"] == [{"to": "S2", "condition": "clarify_limit"}]
+        assert state.strategy_graph["S1"] == [{"to": "END", "condition": "clarify_limit"}]
         assert "S1" not in state.clarify_attempts
+
+        update_result = update_node.run(state, user_text="还是说不清", **clarify_second)
+        assert update_result["next_strategy"] == "END"
+        assert state.current_strategy == "END"
+        assert state.completed is True
+
+
+def test_strategy_node_produces_media(monkeypatch, tmp_path):
+    template = {"strategies": [{"id": "S1", "template": "请介绍一下近况。", "next": "END"}]}
+    state = _build_state(template)
+    state.current_item_name = "抑郁情绪"
+
+    class DummyTTS:
+        def synthesize(self, sid: str, text: str, voice=None):
+            path = tmp_path / "audio.wav"
+            path.write_bytes(b"fake")
+            return str(path)
+
+    class DummyOSS:
+        enabled = True
+
+        def store_artifact(self, sid, category, path, metadata=None):
+            return f"https://oss.example/{category}/{Path(path).name}"
+
+    dummy_tts = DummyTTS()
+
+    monkeypatch.setattr(
+        "services.orchestrator.langgraph_core.media.generate_digital_human_video",
+        lambda sid, audio: "http://example.com/video.mp4",
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.langgraph_core.media.oss_client",
+        DummyOSS(),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.langgraph_core.nodes.node_strategy.LLM.call",
+        lambda tool, payload: {"text": "这是一个测试问题？"},
+    )
+
+    strategy_node = StrategyNode("strategy")
+    strategy_node._tts_adapter = dummy_tts  # type: ignore[attr-defined]
+    strategy_node._digital_human_enabled = True  # type: ignore[attr-defined]
+
+    payload = strategy_node.run(state, role="agent")
+
+    assert payload["ask"] == "这是一个测试问题？"
+    assert payload["tts_text"] == "这是一个测试问题？"
+    assert payload["tts_local_path"].endswith("audio.wav")
+    assert payload["tts_url"] == "https://oss.example/tts/audio/audio.wav"
+    assert payload["media_type"] == "video"
+    assert payload["video_url"] == "http://example.com/video.mp4"
+    assert payload["media"]["tts_url"] == "https://oss.example/tts/audio/audio.wav"
