@@ -87,7 +87,7 @@ class _TemplateBuilderFallbackStrategy(_FallbackToolStrategy):
 
     def run(self, payload: Dict[str, Any]) -> Any:
         stub = {
-            "yaml": "project_id: 0\nstrategies: {}\n",
+            "yaml": "item_id: 0\nstrategies: {}\n",
             "strategy_descriptions": {},
         }
         return {"text": json.dumps(stub, ensure_ascii=False)}

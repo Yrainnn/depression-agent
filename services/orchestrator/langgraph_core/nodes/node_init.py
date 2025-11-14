@@ -18,7 +18,7 @@ class InitNode(Node):
     def run(self, state: SessionState, **_: Any) -> Dict[str, Any]:
         template = load_template(self.template_root, state.index)
         state.current_template = template
-        state.current_item_name = template.get("project_name", f"item_{state.index}")
+        state.current_item_name = template.get("name", f"item_{state.index}")
         ensure_item_context(state)
 
         state.strategy_sequence = []

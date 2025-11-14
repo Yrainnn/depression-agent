@@ -18,18 +18,18 @@ except Exception:  # pragma: no cover - runtime guard
     ConversationRepository = None  # type: ignore
     _shared_repository = None  # type: ignore
 
-from services.orchestrator.questions_hamd17 import HAMD17_QUESTION_BANK, MAX_SCORE
+from services.orchestrator.config.item_registry import (
+    ITEM_IDS,
+    MAX_TOTAL_SCORE,
+    get_item_max_score,
+    get_item_name,
+)
 from services.oss.client import oss_client
 
 LOGGER = logging.getLogger(__name__)
 
 REPORT_VERSION = "v0.2"
 REPORT_DIR = Path("/tmp/depression_agent_reports")
-HAMD_TOTAL = sum(MAX_SCORE.values())
-QUESTION_LOOKUP = {
-    f"H{idx:02d}": (node.get("primary") or ["请描述该条目相关情况。"])[0]
-    for idx, node in HAMD17_QUESTION_BANK.items()
-}
 
 
 def _get_uploader() -> OSSUploader:
@@ -76,23 +76,17 @@ def _resolve_repository() -> Optional[ConversationRepository]:  # type: ignore[v
     return None
 
 
-def _question_for(item_id: str) -> str:
-    if item_id in QUESTION_LOOKUP:
-        return QUESTION_LOOKUP[item_id]
-    if item_id.startswith("H") and item_id[1:].isdigit():
-        lookup = f"H{int(item_id[1:]):02d}"
-        return QUESTION_LOOKUP.get(lookup, QUESTION_LOOKUP.get("H01", "条目信息"))
-    if item_id.isdigit():
-        lookup = f"H{int(item_id):02d}"
-        return QUESTION_LOOKUP.get(lookup, QUESTION_LOOKUP.get("H01", "条目信息"))
-    return QUESTION_LOOKUP.get("H01", "条目信息")
-
-
-def _max_for(item_id: str) -> Optional[int]:
-    if item_id.startswith("H") and item_id[1:].isdigit():
-        return MAX_SCORE.get(int(item_id[1:]))
-    if item_id.isdigit():
-        return MAX_SCORE.get(int(item_id))
+def _normalize_item_index(raw_id: Any) -> Optional[int]:
+    if isinstance(raw_id, int):
+        return raw_id
+    if isinstance(raw_id, str):
+        stripped = raw_id.strip()
+        if not stripped:
+            return None
+        if stripped.upper().startswith("H") and stripped[1:].isdigit():
+            return int(stripped[1:])
+        if stripped.isdigit():
+            return int(stripped)
     return None
 
 
@@ -136,7 +130,7 @@ def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> Dict[str, Dict[str,
             evidence_refs = [str(evidence_refs)]
         max_score = item.get("max_score")
         if not isinstance(max_score, (int, float)):
-            fallback = _max_for(key)
+            fallback = get_item_max_score(numeric_id)
             max_score = fallback if fallback is not None else None
         reason = item.get("reason")
         if isinstance(reason, str):
@@ -145,7 +139,7 @@ def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> Dict[str, Dict[str,
             reason = ""
         normalized[key] = {
             "item_id": key,
-            "question": item.get("question") or item.get("item_name") or _question_for(key),
+            "question": item.get("question") or item.get("item_name") or get_item_name(numeric_id),
             "score": score_value,
             "confidence": confidence,
             "max_score": max_score,
@@ -157,12 +151,12 @@ def _normalize_per_item_scores(raw_scores: Iterable[Any]) -> Dict[str, Dict[str,
 
 def _expand_scores(per_item: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    for idx in range(1, len(MAX_SCORE) + 1):
+    for idx in ITEM_IDS:
         key = f"H{idx:02d}"
         base = {
             "item_id": key,
-            "question": QUESTION_LOOKUP.get(key, f"条目 {idx}"),
-            "max_score": MAX_SCORE.get(idx, ""),
+            "question": get_item_name(idx),
+            "max_score": get_item_max_score(idx) or "",
             "score": None,
             "score_display": "—",
             "confidence": None,
@@ -291,7 +285,7 @@ def build_pdf(sid: str, score_json: Dict[str, Any]) -> Dict[str, str]:
     total_score = _compute_total_score(expanded_scores, score_json)
     max_total = score_json.get("max_total")
     if not isinstance(max_total, (int, float)):
-        max_total = HAMD_TOTAL
+        max_total = MAX_TOTAL_SCORE
 
     diagnosis = score_json.get("diagnosis")
     advice = score_json.get("advice")

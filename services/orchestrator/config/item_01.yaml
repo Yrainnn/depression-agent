@@ -1,7 +1,7 @@
-project_id: 1
-project_name: 抑郁心境
+item_id: 1
+name: 抑郁心境
 risk_level: 中等
-response_time: "<=30s"
+expected_time: "<=30s"
 
 strategies:
   - id: S2

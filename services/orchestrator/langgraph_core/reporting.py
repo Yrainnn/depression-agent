@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from services.orchestrator.questions_hamd17 import MAX_SCORE
+from services.orchestrator.config.item_registry import (
+    MAX_TOTAL_SCORE,
+    get_item_max_score,
+    get_item_name,
+)
 
 from .state_types import SessionState
 
@@ -32,14 +36,18 @@ def _prepare_per_item_scores(state: SessionState, items: List[Dict[str, Any]]) -
             item.get("question")
             or item.get("item_name")
             or (ctx.item_name if ctx and ctx.item_name else None)
-            or _question_for(f"H{item_id:02d}")
+            or get_item_name(item_id)
         )
         score_raw = item.get("score")
         try:
             score_value = float(score_raw) if score_raw is not None else None
         except (TypeError, ValueError):
             score_value = None
-        max_score = item.get("max_score") if isinstance(item.get("max_score"), (int, float)) else MAX_SCORE.get(item_id)
+        max_score = (
+            item.get("max_score")
+            if isinstance(item.get("max_score"), (int, float))
+            else get_item_max_score(item_id)
+        )
         entry: Dict[str, Any] = {
             "item_id": item_id,
             "question": question,
@@ -87,7 +95,7 @@ def prepare_report_payload(state: SessionState) -> Optional[Dict[str, Any]]:
         payload["total_score"] = round(computed_total, 2)
 
     if not isinstance(payload.get("max_total"), (int, float)):
-        payload["max_total"] = sum(MAX_SCORE.values())
+        payload["max_total"] = MAX_TOTAL_SCORE
 
     summary = state.patient_context.conversation_summary
     if isinstance(summary, str) and summary.strip():

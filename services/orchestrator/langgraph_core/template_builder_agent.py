@@ -65,7 +65,7 @@ class TemplateBuilderAgent:
         os.makedirs(os.path.dirname(self.descriptions_path), exist_ok=True)
 
     def build_from_text(
-        self, text: str, item_id: int, *, project_name: Optional[str] = None
+        self, text: str, item_id: int, *, item_name: Optional[str] = None
     ) -> str:
         prompt = (
             "请将以下策略稿转为结构化YAML配置，并额外输出每个策略的描述信息。\n"
@@ -93,9 +93,9 @@ class TemplateBuilderAgent:
             data = yaml.safe_load(yaml_text)
         else:
             data = _safe_load_fallback(yaml_text)
-        data.setdefault("project_id", item_id)
-        if project_name:
-            data["project_name"] = project_name
+        data.setdefault("item_id", item_id)
+        if item_name:
+            data["name"] = item_name
 
         descriptions = payload.get("strategy_descriptions", {})
         normalized_descriptions = self._normalize_descriptions(descriptions)

@@ -6,7 +6,11 @@ from typing import Any, Dict, List, Tuple
 
 from ..llm_tools import LLM, ScoreItemTool
 from ..state_types import SessionState
-from ...questions_hamd17 import MAX_SCORE
+from ...config.item_registry import (
+    MAX_TOTAL_SCORE,
+    get_item_max_score,
+    get_item_name,
+)
 from .base_node import Node
 
 
@@ -25,7 +29,7 @@ class ScoreNode(Node):
     def run(self, state: SessionState, **_: Any) -> Dict[str, Any]:
         if not state.item_contexts:
             state.analysis = {
-                "total_score": {"sum": 0, "max": sum(MAX_SCORE.values())},
+                "total_score": {"sum": 0, "max": MAX_TOTAL_SCORE},
                 "per_item_scores": [],
             }
             return {"analysis": state.analysis}
@@ -83,9 +87,9 @@ class ScoreNode(Node):
             item_entry: Dict[str, Any] = {
                 "item_id": item_id,
                 "item_code": f"H{item_id:02d}",
-                "question": ctx.item_name or f"条目 {item_id}",
+                "question": ctx.item_name or get_item_name(item_id),
                 "score": score_value,
-                "max_score": MAX_SCORE.get(item_id),
+                "max_score": get_item_max_score(item_id),
             }
             if reason_text:
                 item_entry["reason"] = reason_text
@@ -93,7 +97,7 @@ class ScoreNode(Node):
             items.append(item_entry)
 
         total_score = round(total, 2)
-        max_total = sum(MAX_SCORE.values())
+        max_total = MAX_TOTAL_SCORE
 
         diagnosis: str
         advice: str

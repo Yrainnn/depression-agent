@@ -39,7 +39,7 @@ def test_template_builder_generates_yaml_and_descriptions(tmp_path: Path, monkey
 
     monkeypatch.setattr(tba.LLM, "call", fake_call)
 
-    yaml_path = agent.build_from_text("策略草案", 7, project_name="测试项目")
+    yaml_path = agent.build_from_text("策略草案", 7, item_name="测试项目")
     assert Path(yaml_path).exists()
 
     with open(yaml_path, "r", encoding="utf-8") as fh:
@@ -49,8 +49,8 @@ def test_template_builder_generates_yaml_and_descriptions(tmp_path: Path, monkey
     else:
         data = tba._safe_load_fallback(yaml_content)
 
-    assert data["project_id"] == 7
-    assert data["project_name"] == "测试项目"
+    assert data["item_id"] == 7
+    assert data["name"] == "测试项目"
     assert "S1" in (data.get("strategies") or {})
 
     descriptions_module = runpy.run_path(str(descriptions_path))
