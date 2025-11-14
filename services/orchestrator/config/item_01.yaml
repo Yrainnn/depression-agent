@@ -1,8 +1,7 @@
 item_id: 1
 name: 抑郁心境
-max_score: 4
 risk_level: 中等
-expected_time: "<=30秒"
+expected_time: "<=30s"
 
 strategies:
   - id: S2
