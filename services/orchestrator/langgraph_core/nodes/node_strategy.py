@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import logging
+from typing import Any, Dict, List, Optional
+
+from services.orchestrator.prompts.strategy_descriptions import (
+    STRATEGY_DESCRIPTIONS,
+)
+
+from packages.common.config import settings
+from services.tts.tts_adapter import TTSAdapter
+
+from ..media import build_media_payload
 
 from services.orchestrator.prompts.strategy_descriptions import (
     STRATEGY_DESCRIPTIONS,
@@ -12,12 +22,19 @@ from ..state_types import SessionState
 from .base_node import Node
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class StrategyNode(Node):
     """策略节点：读取模板并生成下一问"""
 
     def __init__(self, name: str):
         super().__init__(name)
         self._strategy_descriptions = STRATEGY_DESCRIPTIONS
+        self._tts_adapter = TTSAdapter()
+        self._digital_human_enabled = bool(
+            getattr(settings, "digital_human_enabled", False)
+        )
 
     def _build_strategy_graph(self, state: SessionState, template: Dict[str, Any]) -> None:
         raw_strategies = template.get("strategies", []) or []
@@ -166,6 +183,16 @@ class StrategyNode(Node):
                 "branches": state.current_branches,
                 "strategy_graph": state.strategy_graph,
             }
+            if question:
+                media = build_media_payload(
+                    self._tts_adapter,
+                    state.sid,
+                    question,
+                    digital_human_enabled=self._digital_human_enabled,
+                )
+                if media:
+                    response.update(media)
+                    response["media"] = media
             if state.default_next_strategy:
                 response["default_next"] = state.default_next_strategy
             if override:

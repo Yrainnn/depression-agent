@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     dashscope_tts_model: str = Field("cosyvoice-v2", alias="DASHSCOPE_TTS_MODEL")
     dashscope_tts_voice: str = Field("longxiaochun_v2", alias="DASHSCOPE_TTS_VOICE")
     dashscope_tts_format: str = Field("wav", alias="DASHSCOPE_TTS_FORMAT")
+    digital_human_enabled: bool = Field(False, alias="DIGITAL_HUMAN_ENABLED")
     prompt_hamd17_path: Optional[str] = Field(None, alias="PROMPT_HAMD17_PATH")
     prompt_diagnosis_path: Optional[str] = Field(None, alias="PROMPT_DIAGNOSIS_PATH")
     prompt_mdd_judgment_path: Optional[str] = Field(None, alias="PROMPT_MDD_JUDGMENT_PATH")
@@ -154,6 +155,10 @@ class Settings(BaseSettings):
     @property
     def DASHSCOPE_TTS_FORMAT(self) -> str:
         return self.dashscope_tts_format
+
+    @property
+    def DIGITAL_HUMAN_ENABLED(self) -> bool:
+        return self.digital_human_enabled
 
     @property
     def PROMPT_HAMD17_PATH(self) -> Optional[str]:

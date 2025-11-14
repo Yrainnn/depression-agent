@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 from services.orchestrator.langgraph_core.llm_tools import (
@@ -185,3 +186,50 @@ def test_clarify_retries_then_falls_back_to_default():
         assert update_result["next_strategy"] == "END"
         assert state.current_strategy == "END"
         assert state.completed is True
+
+
+def test_strategy_node_produces_media(monkeypatch, tmp_path):
+    template = {"strategies": [{"id": "S1", "template": "请介绍一下近况。", "next": "END"}]}
+    state = _build_state(template)
+    state.current_item_name = "抑郁情绪"
+
+    class DummyTTS:
+        def synthesize(self, sid: str, text: str, voice=None):
+            path = tmp_path / "audio.wav"
+            path.write_bytes(b"fake")
+            return str(path)
+
+    class DummyOSS:
+        enabled = True
+
+        def store_artifact(self, sid, category, path, metadata=None):
+            return f"https://oss.example/{category}/{Path(path).name}"
+
+    dummy_tts = DummyTTS()
+
+    monkeypatch.setattr(
+        "services.orchestrator.langgraph_core.media.generate_digital_human_video",
+        lambda sid, audio: "http://example.com/video.mp4",
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.langgraph_core.media.oss_client",
+        DummyOSS(),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.langgraph_core.nodes.node_strategy.LLM.call",
+        lambda tool, payload: {"text": "这是一个测试问题？"},
+    )
+
+    strategy_node = StrategyNode("strategy")
+    strategy_node._tts_adapter = dummy_tts  # type: ignore[attr-defined]
+    strategy_node._digital_human_enabled = True  # type: ignore[attr-defined]
+
+    payload = strategy_node.run(state, role="agent")
+
+    assert payload["ask"] == "这是一个测试问题？"
+    assert payload["tts_text"] == "这是一个测试问题？"
+    assert payload["tts_local_path"].endswith("audio.wav")
+    assert payload["tts_url"] == "https://oss.example/tts/audio/audio.wav"
+    assert payload["media_type"] == "video"
+    assert payload["video_url"] == "http://example.com/video.mp4"
+    assert payload["media"]["tts_url"] == "https://oss.example/tts/audio/audio.wav"
