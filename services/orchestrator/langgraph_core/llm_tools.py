@@ -30,9 +30,49 @@ class _FallbackBackend(_BaseBackend):
                 question += "？"
             return {"text": question}
         if func == "risk_detect":
-            if any(token in text for token in ("想死", "自杀", "活着没意思", "结束生命")):
-                return {"risk_level": "high"}
-            return {"risk_level": "none"}
+            high_keywords = ["自杀", "suicide", "结束生命", "想死", "割腕", "跳楼", "寻死", "自残", "了结自己"]
+            medium_keywords = ["不想活", "活着没意思", "想消失", "想离开这个世界", "活得好累", "毫无希望", "绝望", "轻生"]
+            low_keywords = ["没意思", "难受", "情绪低落", "很沮丧", "不开心", "消极"]
+
+            triggers: list[str] = []
+            risk_level = "none"
+
+            for token in high_keywords:
+                if token and token in text:
+                    triggers.append(token)
+                    risk_level = "high"
+
+            if risk_level != "high":
+                for token in medium_keywords:
+                    if token and token in text:
+                        triggers.append(token)
+                        risk_level = "medium"
+
+            if risk_level == "none":
+                for token in low_keywords:
+                    if token and token in text:
+                        triggers.append(token)
+                        risk_level = "low"
+
+            reason = "未检测到明显危险信号"
+            if risk_level == "high":
+                reason = "出现明确的自伤或自杀意图"
+            elif risk_level == "medium":
+                reason = "表达强烈的求死或消失念头"
+            elif risk_level == "low":
+                reason = "存在轻度的消极或绝望情绪"
+
+            result: Dict[str, Any] = {"risk_level": risk_level}
+            if triggers:
+                result["triggers"] = triggers
+            result["reason"] = reason
+            if risk_level in {"medium", "high"}:
+                result["advice"] = (
+                    "请立即转接人工或联系当地紧急服务。"
+                    if risk_level == "high"
+                    else "请加以安抚并鼓励其寻求专业帮助。"
+                )
+            return result
         if func == "extract_facts":
             facts: Dict[str, Any] = {}
             if "分" in text:
