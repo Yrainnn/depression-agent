@@ -1,0 +1,28 @@
+item_id: 5
+name: 睡眠间断（中期失眠）
+max_score: 2
+risk_level: 低
+expected_time: "<=15秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "夜里睡着后情况怎么样？会不会半夜醒来？"
+    branches:
+      - condition: 肯定
+        next: S1
+      - condition: 否定
+        next: END
+
+  - id: S1
+    name: 症状细化选项
+    exec_node: 醒来频率不明时
+    template: "是偶尔一两次还是什么？一晚上醒超过2次吗？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 获取频率后
+    template: "您说您夜里会醒{次数}次，每次大概清醒{时长}分钟，是这样吗？"
+    next: END

@@ -1,0 +1,28 @@
+item_id: 15
+name: 疑病观念
+max_score: 4
+risk_level: 低
+expected_time: "<=20秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "您是不是经常担心自己得了什么重病？比方说一点小不适就怀疑是大问题？"
+    branches:
+      - condition: 肯定
+        next: S8
+      - condition: 否定
+        next: S6
+
+  - id: S6
+    name: 正常化引导
+    exec_node: 描述犹豫或羞于承认时
+    template: "很多人身体有点不舒服就会上网查吓自己，您会不会也这样？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 获取主要担忧后
+    template: "您经常担心的主要是{某严重疾病}，即便体检正常也不放心，对吗？"
+    next: END

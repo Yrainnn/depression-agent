@@ -1,0 +1,28 @@
+item_id: 2
+name: 自责感
+max_score: 4
+risk_level: 低
+expected_time: "<=15秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "这段时间您有没有经常自责，觉得自己做错了什么？"
+    branches:
+      - condition: 肯定
+        next: S5
+      - condition: 否定
+        next: END
+
+  - id: S5
+    name: 元认知
+    exec_node: 若报告内疚
+    template: "您觉得这种内疚感来自哪里？是因为真的做错事，还是疾病让您这样想？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 回答后
+    template: "您的意思是因为…所以感到内疚，对吗？"
+    next: END

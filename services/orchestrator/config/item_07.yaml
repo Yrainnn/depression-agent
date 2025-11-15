@@ -1,0 +1,37 @@
+item_id: 7
+name: 工作与兴趣（工作与活动）
+max_score: 4
+risk_level: 中等
+expected_time: "<=45秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近是不是提不起劲做事？平时喜欢的活动现在有没有兴趣参加？"
+    branches:
+      - condition: 承认缺乏兴趣
+        next: S4
+      - condition: 否认
+        next: S10
+        next_prompt: "那工作学习效率还和以前一样吗？"
+
+  - id: S4
+    name: 比较框架
+    exec_node: 活动兴趣下降明确后
+    template: "和您状态最好时比，现在干活的劲头和专注力下降了多少？一半不到还是更低？"
+    next: S3
+
+  - id: S3
+    name: 三维锚定
+    exec_node: 疲乏程度评估
+    template:
+      - "每天都会感觉很累没精神吗？"
+      - "最近家务或工作有落下吗？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 关键描述后
+    template: "您提到现在很难集中注意力工作，而且对以前喜欢的事没有兴趣，是吧？"
+    next: END

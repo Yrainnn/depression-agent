@@ -1,0 +1,28 @@
+item_id: 13
+name: 全身症状
+max_score: 2
+risk_level: 低
+expected_time: "<=20秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "有没有哪里不舒服？比如头疼、腰酸、没力气之类的？"
+    branches:
+      - condition: 存在多种不适
+        next: S8
+      - condition: 否认或仅疲劳
+        next: S6
+
+  - id: S8
+    name: 回声确认
+    exec_node: 症状罗列后
+    template: "您最近主要是不舒服在{部位}，其他倒没有，对吧？"
+    next: S6
+
+  - id: S6
+    name: 正常化引导
+    exec_node: 难言或隐私症状时
+    template: "有些人情绪不好时会有性欲降低或者女性月经紊乱。这方面您有遇到吗？"
+    next: END

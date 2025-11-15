@@ -1,0 +1,30 @@
+item_id: 6
+name: 早醒（末期失眠）
+max_score: 2
+risk_level: 低
+expected_time: "<=15秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近有没有每天都比平时醒得早很多？一般会早醒多少小时？"
+    branches:
+      - condition: 肯定
+        next: S3
+      - condition: 否定
+        next: S8
+
+  - id: S3
+    name: 三维锚定
+    exec_node: 需要更精确量化时
+    template:
+      - "最近两周出现几天？"
+      - "早醒后还能再睡着吗？还是一直躺到起床时间？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 结束前总结
+    template: "也就是说，您常常比平时早醒约{小时数}小时，对吗？"
+    next: END

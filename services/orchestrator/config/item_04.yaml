@@ -1,0 +1,34 @@
+item_id: 4
+name: 入睡困难
+max_score: 2
+risk_level: 低
+expected_time: "<=15秒"
+
+strategies:
+  - id: S1
+    name: 症状细化选项
+    exec_node: 初筛
+    template: "您晚上入睡怎么样？是很难睡着还是还好？需要很久才能睡着吗？"
+    next: S2
+
+  - id: S2
+    name: 问题簇验证
+    exec_node: 若提及入睡困难
+    template: "大概要多久才能睡着？超过半小时吗？有没有用安眠药？"
+    branches:
+      - condition: 偶尔难入睡
+        next: S9
+      - condition: 使用助眠措施
+        next: S8
+
+  - id: S9
+    name: 时间弹性
+    exec_node: 频率追问
+    template: "偶尔是每周几天？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 信息收集后
+    template: "总结一下，您通常需要大约{患者描述时间}才能睡着，对吗？"
+    next: END

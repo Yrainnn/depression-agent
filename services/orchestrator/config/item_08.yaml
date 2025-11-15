@@ -1,0 +1,37 @@
+item_id: 8
+name: 阻滞（精神运动迟缓）
+max_score: 4
+risk_level: 高
+expected_time: "<=30秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近有人说您变得动作或说话比以前慢了吗？您自己有没有这种感觉？"
+    branches:
+      - condition: 承认迟缓
+        next: S3
+      - condition: 否认
+        next: S7
+
+  - id: S7
+    name: 重点追问
+    exec_node: 否认迟缓但观察到征象时
+    template: "我注意到您说话有点慢，是不是在思考时感觉脑子变迟钝了？"
+    next: S3
+
+  - id: S3
+    name: 三维锚定
+    exec_node: 确认存在迟缓后
+    template:
+      - "动作慢还是思维慢？还是两者都有？"
+      - "是不是每天都有？大部分时间如此？"
+      - "严重程度如何？走路是不是比平时慢很多？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 信息核实
+    template: "总结一下，您感觉最近思考和动作都慢了很多，而且几乎每天如此，是吗？"
+    next: END

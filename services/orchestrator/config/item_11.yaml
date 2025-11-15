@@ -1,0 +1,28 @@
+item_id: 11
+name: 躯体性焦虑
+max_score: 4
+risk_level: 中等
+expected_time: "<=20秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近紧张的时候身体有没有不舒服？比如心跳很快、出汗、肚子不舒服之类的？"
+    branches:
+      - condition: 出现多种症状
+        next: S8
+      - condition: 否定
+        next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 汇总患者症状后
+    template: "您紧张时会心慌手抖，有时肚子不舒服，对吧？"
+    next: S6
+
+  - id: S6
+    name: 正常化引导
+    exec_node: 患者困惑或羞于启齿时
+    template: "有的人紧张会肠胃不适，其实很常见。您有没有类似情况？"
+    next: END

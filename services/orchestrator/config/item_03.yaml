@@ -1,0 +1,44 @@
+item_id: 3
+name: 自杀意念
+max_score: 4
+risk_level: 极高
+expected_time: "<=90秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近两周，有没有出现过想伤害自己或者结束生命的念头？"
+    branches:
+      - condition: 肯定
+        next: S3
+      - condition: 否定
+        next: S10
+        next_prompt: "没有自杀想法，那活着有没有觉得特别没意思、绝望？"
+
+  - id: S3
+    name: 三维锚定
+    exec_node: 确认存在危险念头后
+    template:
+      - "这个想法大概从什么时候开始的？最近一个月还有过吗？"
+      - "这些念头最近出现得频繁吗？一周里有几天会冒出来？"
+      - "每次出现时有多强烈？如果十分代表最强烈，您会打几分？能控制住不去行动吗？"
+    next: S2_followup
+
+  - id: S2_followup
+    name: 自杀计划细节追问
+    exec_node: 三维锚定之后
+    template: "有没有具体想过用什么方式？真的采取过行动吗？"
+    next: S7
+
+  - id: S7
+    name: 重点追问
+    exec_node: 全程贯穿
+    template: "此刻还在想吗？需要我们帮助保证安全吗？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 每条关键信息后
+    template: "您刚提到…，我理解的是…，对吗？"
+    next: END

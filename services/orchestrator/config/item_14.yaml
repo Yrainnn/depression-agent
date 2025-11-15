@@ -1,0 +1,42 @@
+item_id: 14
+name: 生殖系统症状
+max_score: 2
+risk_level: 低
+expected_time: "<=15秒"
+
+strategies:
+  - id: S6
+    name: 正常化引导
+    exec_node: 初筛
+    template: "很多抑郁症患者都会性趣减退。这方面您感觉怎么样？"
+    next: S2
+
+  - id: S2
+    name: 问题簇验证
+    exec_node: 若患者提及相关改变
+    template: "最近性生活情况如何？相比之前有没有明显变化？"
+    branches:
+      - condition: 男性
+        next: S2_male
+      - condition: 女性
+        next: S2_female
+      - condition: 无更多信息
+        next: S8
+
+  - id: S2_male
+    name: 性功能追问（男性）
+    exec_node: 进一步追问
+    template: "有没有勃起困难或射精问题？"
+    next: S8
+
+  - id: S2_female
+    name: 性功能追问（女性）
+    exec_node: 进一步追问
+    template: "月经有没有受到影响，比如紊乱或闭经？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 回答后
+    template: "您感觉性欲比以前降低了，而且生理功能方面也{存在/不存在}问题，是吧？"
+    next: END

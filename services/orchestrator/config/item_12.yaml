@@ -1,0 +1,34 @@
+item_id: 12
+name: 消化道症状
+max_score: 2
+risk_level: 低
+expected_time: "<=20秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近食欲怎么样？吃饭有变化吗？"
+    branches:
+      - condition: 食欲下降
+        next: S1
+      - condition: 食欲正常
+        next: S2_follow
+
+  - id: S2_follow
+    name: 补充询问
+    exec_node: 无食欲改变时
+    template: "有没有便秘或者消化不良的情况？"
+    next: S1
+
+  - id: S1
+    name: 症状细化选项
+    exec_node: 描述模糊时
+    template: "比如突然暴饮暴食或者完全不想吃，有出现这种极端情况吗？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 信息收集后
+    template: "您的意思是最近胃口{好/不好}，饭量比以前少{程度}，对吗？"
+    next: END

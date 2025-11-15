@@ -1,0 +1,32 @@
+item_id: 16
+name: 体重下降
+max_score: 2
+risk_level: 低
+expected_time: "<=10秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近体重有没有下降？衣服裤子有没有变松？"
+    branches:
+      - condition: 肯定
+        next: S3
+      - condition: 否定
+        next: S8
+
+  - id: S3
+    name: 三维锚定
+    exec_node: 无法提供具体数字时
+    template:
+      - "和一个月/半年前比呢？称过体重吗？"
+      - "衣服现在穿着有没有明显变宽松？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 信息确认
+    template:
+      - "您的意思是体重基本没变，对吧？"
+      - "或者：一个月内瘦了大约{数字}斤，是吗？"
+    next: END

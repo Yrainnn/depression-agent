@@ -1,0 +1,34 @@
+item_id: 10
+name: 精神性焦虑
+max_score: 4
+risk_level: 中等
+expected_time: "<=30秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "这阵子心情紧张不安的时候多吗？有没有老觉得焦虑、担心一些事情？"
+    branches:
+      - condition: 肯定
+        next: S4
+      - condition: 否认
+        next: S4
+
+  - id: S4
+    name: 比较框架
+    exec_node: 焦虑症状不明确时
+    template: "假如平时放松是0分，现在的紧张程度大概几分？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 讨论焦虑源后
+    template: "也就是说，您主要是为{某事}紧张，对吗？"
+    next: S10
+
+  - id: S10
+    name: 非对立追问
+    exec_node: 否认焦虑但神情紧张时
+    template: "很多人压力大时没察觉焦虑。最近睡眠或胃口不好，会不会其实心里隐隐担心着什么？"
+    next: END

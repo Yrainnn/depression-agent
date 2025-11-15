@@ -1,0 +1,37 @@
+item_id: 9
+name: 激越（焦躁不安）
+max_score: 4
+risk_level: 高
+expected_time: "<=30秒"
+
+strategies:
+  - id: S2
+    name: 问题簇验证
+    exec_node: 初筛
+    template: "最近有没有觉得心烦意乱，静不下来的感觉？比如总想动来动去？"
+    branches:
+      - condition: 存在烦躁
+        next: S3
+      - condition: 否认
+        next: S7
+
+  - id: S7
+    name: 重点追问
+    exec_node: 否认但观察到轻微坐立不安
+    template: "我看到您在座位上不停变换姿势，是感觉有点坐不住吗？"
+    next: S3
+
+  - id: S3
+    name: 三维锚定
+    exec_node: 确认存在激越后
+    template:
+      - "烦躁是偶尔还是每天？持续几个小时？"
+      - "什么时候特别烦？"
+      - "做些什么能缓解？需要别人安抚吗？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 信息核对
+    template: "您说最近常常烦躁得坐不住，一天里有好几个小时都会这样，对吧？"
+    next: END

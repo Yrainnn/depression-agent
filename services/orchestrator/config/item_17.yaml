@@ -1,0 +1,34 @@
+item_id: 17
+name: 病情理解力（Insight）
+max_score: 4
+risk_level: 低
+expected_time: "<=15秒"
+
+strategies:
+  - id: S5
+    name: 元认知
+    exec_node: 初筛
+    template: "您觉得自己现在的状态是一种生病的表现吗？需要治疗吗？"
+    branches:
+      - condition: 承认患病
+        next: S5_follow
+      - condition: 否认
+        next: S10
+
+  - id: S5_follow
+    name: 元认知追问
+    exec_node: 若承认患病
+    template: "那您觉得主要是心理问题导致的，还是有其他原因？"
+    next: S8
+
+  - id: S10
+    name: 非对立追问
+    exec_node: 否认患病时
+    template: "有的人会觉得不是生病，而是自己意志不坚强导致的，您是不是也这么想？"
+    next: S8
+
+  - id: S8
+    name: 回声确认
+    exec_node: 讨论后
+    template: "总结一下，您{承认/不太承认}自己目前是生病状态，对原因的看法是…,对吗？"
+    next: END
