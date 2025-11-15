@@ -55,11 +55,54 @@ def _call_dm_step(
     return response.json()
 
 
+def _derive_agent_reply(result: Dict[str, Any]) -> str:
+    """Extract the assistant-facing reply from the orchestrator response."""
+
+    if not isinstance(result, dict):
+        return ""
+
+    for key in ("ask", "final_message", "next_utterance"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    message = result.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+
+    return ""
+
+
+def _derive_risk_text(result: Dict[str, Any]) -> str:
+    """Convert risk metadata into a display-friendly summary."""
+
+    if not isinstance(result, dict):
+        return "当前状态：无紧急风险提示"
+
+    raw_risk = result.get("risk_result")
+    if not isinstance(raw_risk, dict):
+        raw_risk = {}
+
+    risk_level = (result.get("risk_level") or raw_risk.get("risk_level") or "").lower()
+    risk_message = (
+        raw_risk.get("message")
+        or raw_risk.get("risk_advice")
+        or result.get("risk_advice")
+        or result.get("message")
+    )
+
+    if risk_level == "high":
+        return f"高风险提示：{risk_message or '请立即寻求专业帮助。'}"
+
+    if risk_level == "medium":
+        return f"中风险提示：{risk_message or '建议尽快咨询专业人士。'}"
+
+    return "当前状态：无紧急风险提示"
+
+
 def _generate_report(session_id: str) -> str:
     try:
-        resp = requests.post(
-            f"{API_BASE}/report/build", json={"sid": session_id}, timeout=60
-        )
+        resp = requests.post(f"{API_BASE}/dm/report", json={"sid": session_id}, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         url = data.get("report_url")
@@ -92,7 +135,7 @@ def user_step(
         history = history + [(user_label, f"❌ 请求失败：{exc}")]
         return history, "⚠️ 请求失败，请稍后重试。", {}, session_id, None
 
-    assistant_reply = result.get("next_utterance", "")
+    assistant_reply = _derive_agent_reply(result)
     previews = result.get("segments_previews") or []
     media_value = _extract_media_value(session_id, result)
 
@@ -105,13 +148,11 @@ def user_step(
     user_label: Optional[str] = None
     if text_payload:
         user_label = message
-    history = history + [(user_label or None, assistant_reply)]
+    if assistant_reply:
+        history = history + [(user_label or None, assistant_reply)]
 
     progress = result.get("progress", {})
-    risk_flag = result.get("risk_flag", False)
-    risk_text = (
-        "⚠️ 检测到高风险，请立即寻求紧急帮助。" if risk_flag else "无紧急风险提示。"
-    )
+    risk_text = _derive_risk_text(result)
 
     return history, risk_text, progress, session_id, media_value
 
@@ -133,15 +174,12 @@ def initialize_conversation(
         history.append((None, error_text))
         return history, sid, "⚠️ 初始化失败，请稍后重试。", {}, None
 
-    assistant_reply = result.get("next_utterance", "")
+    assistant_reply = _derive_agent_reply(result)
     if assistant_reply:
         history.append((None, assistant_reply))
 
     progress = result.get("progress", {})
-    risk_flag = result.get("risk_flag", False)
-    risk_text = (
-        "⚠️ 检测到高风险，请立即寻求紧急帮助。" if risk_flag else "无紧急风险提示。"
-    )
+    risk_text = _derive_risk_text(result)
 
     media_value = _extract_media_value(sid, result)
     return history, sid, risk_text, progress, media_value
@@ -637,17 +675,70 @@ def _ensure_audio_playable_url(session_id: str, audio_value: Optional[str]) -> O
     return str(Path(local_path).resolve())
 
 
+def _resolve_media_dict(session_id: str, media: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(media, dict):
+        return None
+
+    media_type = (media.get("media_type") or "").lower()
+    if media_type == "video" and media.get("video_url"):
+        return media.get("video_url")
+
+    if media_type == "audio":
+        audio_url = media.get("tts_url") or media.get("audio_url")
+        return _ensure_audio_playable_url(session_id, audio_url)
+
+    return None
+
+
 def _extract_media_value(session_id: str, result: Dict[str, Any]) -> Optional[str]:
     """从对话结果中提取可用于播放的媒体 URL。"""
     if not result:
         return None
 
-    media_type = (result.get("media_type") or "").lower()
-    if media_type == "video":
-        return result.get("video_url")
+    primary = _resolve_media_dict(session_id, result.get("media"))
+    if primary:
+        return primary
 
-    if media_type == "audio":
-        return _ensure_audio_playable_url(session_id, result.get("tts_url"))
+    fallback = _resolve_media_dict(
+        session_id,
+        {
+            "media_type": result.get("media_type"),
+            "video_url": result.get("video_url"),
+            "tts_url": result.get("tts_url"),
+        },
+    )
+    if fallback:
+        return fallback
+
+    closing = _resolve_media_dict(session_id, result.get("final_message_media"))
+    if closing:
+        return closing
+
+    closing_fallback = _resolve_media_dict(
+        session_id,
+        {
+            "media_type": result.get("final_message_media_type"),
+            "video_url": result.get("final_message_video_url"),
+            "tts_url": result.get("final_message_tts_url"),
+        },
+    )
+    if closing_fallback:
+        return closing_fallback
+
+    risk_media = _resolve_media_dict(session_id, result.get("risk_media"))
+    if risk_media:
+        return risk_media
+
+    risk_fallback = _resolve_media_dict(
+        session_id,
+        {
+            "media_type": result.get("risk_media_type"),
+            "video_url": result.get("risk_video_url"),
+            "tts_url": result.get("risk_tts_url"),
+        },
+    )
+    if risk_fallback:
+        return risk_fallback
 
     return None
 

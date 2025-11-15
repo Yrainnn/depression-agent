@@ -1,6 +1,5 @@
 item_id: 1
 name: 抑郁心境
-max_score: 4
 risk_level: 中等
 expected_time: "<=30s"
 
@@ -10,9 +9,9 @@ strategies:
     exec_node: 初筛
     template: "最近两周，大部分时间您的心情是不是都很低落、忧郁？"
     branches:
-      - condition: 明确存在抑郁情绪
+      - condition: "明确存在抑郁情绪"
         next: S4
-      - condition: 否定或含糊
+      - condition: "否定或含糊"
         next: S10
         next_prompt: "情绪没受影响，那有没有觉得每天过得很空洞、乏味？"
 
@@ -20,16 +19,21 @@ strategies:
     name: 比较框架
     exec_node: 情绪确认后
     template: "您觉得现在的难过跟亲人去世那种悲伤比起来，是一样严重还是不太一样？"
-    next: S9
 
   - id: S9
     name: 时间弹性
     exec_node: 补充追问
     template: "这种情绪一天当中有变化吗？比如早上是不是特别重，晚上会不会好一些？"
-    next: S8
+    branches:
+      - condition: "提及昼夜波动"
+        next: S8
 
   - id: S8
     name: 回声确认
     exec_node: 关键信息后
-    template: "听您说{复述患者表述}，是这样吗？"
-    next: END
+    template: "听您说{复述患者表述}，我理解对吗？"
+
+  - id: S10
+    name: 非对立追问
+    exec_node: 备选
+    template: "那有没有觉得每天过得很空洞、乏味？"

@@ -115,11 +115,9 @@ Gradio 前端会展示 TingWu 转写文本，并播放 `tts_url` 指向的音频
 | 能力 | 关键文件 | 环境变量（示例） | 说明 |
 | --- | --- | --- | --- |
 | 听悟实时识别 / 文件回放 | `services/audio/tingwu_client.py`, `services/audio/tingwu_async_client.py` | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`ALIBABA_TINGWU_APPKEY`、`TINGWU_REGION`、`TINGWU_FORMAT=pcm`、`TINGWU_SAMPLE_RATE=16000` | 支持创建实时任务 → NLS SDK 推流 → 结果回传，并提供异步创建/停止封装 |
-| LLM JSON-only 通道 | `services/llm/json_client.py`, `services/llm/prompts.py` | `DEEPSEEK_API_BASE`、`DEEPSEEK_API_KEY`、`PROMPT_*_PATH` | OpenAI 兼容 `/chat/completions`；异常自动回退至规则 Stub，并支持自定义提示模板路径 |
+| LLM JSON-only 通道 | `services/llm/json_client.py`, `services/orchestrator/langgraph_core/llm_tools.py`, `services/orchestrator/prompts/` | `DEEPSEEK_API_BASE`、`DEEPSEEK_API_KEY` | OpenAI 兼容 `/chat/completions`；异常自动回退至规则 Stub，策略/评分提示词集中在 orchestrator 层 |
 | 语音合成 | `services/tts/` | 例如 `COSYVOICE_API_KEY` | 以 Stub 为基线，可替换为供应商 SDK，返回本地或公网 URL |
 | OSS 制品管理 | `services/oss/client.py` | `OSS_ENDPOINT`、`OSS_BUCKET`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、可选 `OSS_KEY_PREFIX` | 报告 PDF 与 TTS 音频统一上传，返回公网 URL |
-
-> 提示模板可通过环境变量 `PROMPT_HAMD17_PATH`、`PROMPT_DIAGNOSIS_PATH`、`PROMPT_MDD_JUDGMENT_PATH`、`PROMPT_CLARIFY_CN_PATH` 覆盖自定义版本。
 
 ---
 
@@ -129,10 +127,11 @@ Gradio 前端会展示 TingWu 转写文本，并播放 `tts_url` 指向的音频
 pytest
 ```
 
-- `tests/test_orchestrator_clarify.py`：验证 LangGraph 澄清分支与风险终止守卫。
 - `tests/test_deepseek_client.py`：覆盖 JSON-only 提示工程链路与回退策略。
-- `tests/test_report_build_pdf.py`：确保报告模板在提示输出变动时仍可渲染。
-- `tests/test_tts_adapter.py`、`tests/test_orchestrator_report.py`：检查音频制品与报告链路一致性。
+- `tests/test_langgraph_coordinator.py`、`tests/test_strategy_flow.py`：验证 LangGraph 主流程与动态加边行为。
+- `tests/test_output_node.py`、`tests/test_risk_node.py`：检查风险守卫、媒体播报与统一出参结构。
+- `tests/test_report_build_pdf.py`、`tests/test_reporting.py`：确保报告模板在提示输出变动时仍可渲染。
+- `tests/test_tts_adapter.py`：确认 CosyVoice/DashScope 语音制品链路一致性。
 
 ---
 

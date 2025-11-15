@@ -7,8 +7,8 @@
 | 角色 | 关键目录 / 文件 | 职责摘要 |
 | --- | --- | --- |
 | API 服务 | `apps/api/main.py`, `apps/api/router_dm.py`, `apps/api/router_asr_tingwu.py` | 基于 FastAPI 提供健康检查、Prometheus 指标、会话驱动 (`/dm/step`)、报告生成、ASR 转写与 TTS 等 REST 接口，是所有客户端的统一入口。 |
-| 会话编排 | `services/orchestrator/langgraph_min.py`, `services/orchestrator/questions_hamd17.py` | LangGraph 风格的最小化调度器，执行 HAMD-17 问诊节点、澄清分支、风险守卫与流程收敛，按需触发 LLM、ASR、TTS、报告与数字人合成。 |
-| 语言模型管道 | `services/llm/json_client.py`, `services/llm/prompts.py` | 封装 DeepSeek JSON-only 通道，加载/覆写 Prompt 模板，具备重试、熔断与澄清补问策略，输出结构化评分与流程控制指令。 |
+| 会话编排 | `services/orchestrator/langgraph_main.py`, `services/orchestrator/langgraph_core/` | LangGraph 协调器负责加载题目模板、调度策略/澄清/风险节点并维护会话状态，按需触发 LLM、TTS、数字人和报告链路。 |
+| 语言模型管道 | `services/llm/json_client.py`, `services/orchestrator/langgraph_core/llm_tools.py`, `services/orchestrator/prompts/` | 封装 DeepSeek JSON-only 通道并通过策略模式注册各类工具，所有 Prompt 模板集中在 orchestrator 层管理。 |
 | 语音与多模态 | `services/audio/tingwu_client.py`, `services/audio/tingwu_async_client.py`, `services/audio/asr_adapter.py`, `services/tts/tts_adapter.py`, `services/digital_human/` | 适配阿里通义听悟（实时/离线）ASR、语音合成 Stub 及数字人生成链路，支持本地文件上传与 WebSocket 推流。 |
 | 风险与报告 | `services/risk/engine.py`, `services/report/build.py` | 风险引擎基于关键词/规则识别高危语句；报告模块组合 Jinja2 + WeasyPrint 生成 PDF，并输出量表明细。 |
 | 对象存储 | `services/oss/client.py`, `services/oss/uploader.py` | 报告 PDF / TTS 音频上传 OSS 并生成公网 URL，若配置缺失则回退到本地文件 URI。 |
@@ -18,9 +18,9 @@
 
 ## 2. 端到端流程
 
-1. **会话入口**：客户端调用 `/dm/step`，`ConversationRepository` 根据 `sid` 装载上下文，`LangGraphMini` 返回下一问句与进度；必要时调用 ASR/TTS/Digital Human 子模块。
+1. **会话入口**：客户端调用 `/dm/step`，`LangGraphCoordinator` 根据 `sid` 装载上下文、刷新策略状态，并返回下一问句与进度；必要时调用 ASR/TTS/Digital Human 子模块。
 2. **多模态采集**：语音通过 `/upload/audio` 或 TingWu WebSocket 进入 `TingwuClientASR`，文本与转写结果统一写入仓储用于 LLM 证据聚合。
-3. **结构化推理**：`DeepSeekJSONClient` 根据 `prompts.py` 模板生成评分、澄清需求或流程决策，异常时触发熔断回退。
+3. **结构化推理**：`DeepSeekJSONClient` 由 `LLMToolBox` 调度，在策略/澄清/评分节点中根据模板 prompt 生成问句、分支与分数，异常时触发熔断回退。
 4. **风险守卫**：`services/risk/engine.py` 每轮检查敏感关键词，必要时修改 LangGraph 状态（如提前终止、安全确认提示）。
 5. **报告与制品**：`services/report/build.py` 汇总量表得分生成 PDF，`OSSUploader` 负责上传；`TTSAdapter`/`digital_human.service` 生成语音与视频制品返回前端。
 6. **可观测性**：`/health` 与 `/metrics` 由 `apps/api/main.py` 暴露，支持 Prometheus 抓取；`/debug/redis` 快速确认 Redis 可用性。
@@ -46,7 +46,7 @@ requirements.txt      # 统一依赖
 ## 5. 扩展策略
 
 - **服务可插拔**：ASR、TTS、OSS、LLM 均以接口/适配器模式封装，便于替换云厂商或离线方案。
-- **Prompt 资产化**：环境变量可覆写默认 Prompt 路径，实现多版本模板 A/B 测试。
+- **Prompt 资产化**：所有 Prompt 模板统一放在 `services/orchestrator/prompts/`，便于版本化管理与批量更新。
 - **容灾回退**：Redis、DeepSeek、OSS 等外部依赖失效时均内置告警与回退逻辑，维持临床会话连续性。
 
 > 如需更细粒度的业务流程，可配合 `README.md` 中的 Mermaid 流程图与接口示例一起参考。

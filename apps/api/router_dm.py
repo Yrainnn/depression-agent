@@ -13,8 +13,10 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from packages.common.config import settings
-from services.orchestrator.langgraph_min import orchestrator
-from services.oss.uploader import OSSUploader
+from services.audio import asr_adapter
+from services.orchestrator.config.item_registry import ITEM_IDS
+from services.orchestrator.langgraph_main import LangGraphCoordinator
+from services.orchestrator.langgraph_core.reporting import prepare_report_payload
 from services.report.build import build_pdf
 from services.tts.tts_adapter import TTSAdapter
 from services.store.repository import repository
@@ -24,6 +26,29 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
 _SID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+_REGISTRY_LOCK = asyncio.Lock()
+_SESSION_LOCKS: Dict[str, asyncio.Lock] = {}
+_COORDINATORS: Dict[str, LangGraphCoordinator] = {}
+_TOTAL_ITEMS = len(ITEM_IDS) or 17
+
+
+async def _get_session_lock(sid: str) -> asyncio.Lock:
+    async with _REGISTRY_LOCK:
+        lock = _SESSION_LOCKS.get(sid)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SESSION_LOCKS[sid] = lock
+        return lock
+
+
+async def _get_coordinator(sid: str) -> LangGraphCoordinator:
+    async with _REGISTRY_LOCK:
+        coordinator = _COORDINATORS.get(sid)
+        if coordinator is None:
+            coordinator = LangGraphCoordinator(total_items=_TOTAL_ITEMS, sid=sid)
+            _COORDINATORS[sid] = coordinator
+        return coordinator
 
 
 async def _rate_limit() -> None:
@@ -46,33 +71,87 @@ class DMStepPayload(BaseModel):
 
 
 class StepResponse(BaseModel):
-    next_utterance: str
+    ts: str
+    sid: str
     progress: Dict[str, Any]
-    risk_flag: bool
-    tts_text: Optional[str] = None
+    waiting_for_user: bool
+    current_item: Dict[str, Any]
+    current_strategy: Optional[str] = None
+    patient_context: Optional[Dict[str, Any]] = None
+    ask: Optional[str] = None
+    media: Optional[Dict[str, Any]] = None
     tts_url: Optional[str] = None
     video_url: Optional[str] = None
     media_type: Optional[str] = None
-    segments_previews: Optional[List[str]] = None
+    risk_level: Optional[str] = None
+    risk_result: Optional[Dict[str, Any]] = None
+    risk_media: Optional[Dict[str, Any]] = None
+    final_message: Optional[str] = None
+    final_message_media: Optional[Dict[str, Any]] = None
+    final_message_tts_url: Optional[str] = None
+    final_message_video_url: Optional[str] = None
+    report_generated: Optional[bool] = None
+    report_url: Optional[str] = None
+    analysis: Optional[Dict[str, Any]] = None
+    completed: Optional[bool] = None
+    risk_flag: Optional[bool] = None
+    next_utterance: Optional[str] = None
 
     class Config:
         extra = "allow"
 
-
 @router.post("/dm/step", response_model=StepResponse)
 async def dm_step(payload: DMStepPayload) -> StepResponse:
-    audio_ref = payload.audio_ref
-    if audio_ref and audio_ref.startswith("file://"):
-        audio_ref = audio_ref[7:]
+    sid = payload.sid
+    _validate_sid(sid)
 
-    result = orchestrator.step(
-        sid=payload.sid,
-        role=payload.role,
-        text=payload.text,
-        audio_ref=audio_ref,
-        scale=payload.scale or "HAMD17",
-    )
-    return StepResponse(**result)
+    coordinator = await _get_coordinator(sid)
+    lock = await _get_session_lock(sid)
+    async with lock:
+        combined: Dict[str, Any] = {}
+
+        if payload.text:
+            user_result = coordinator.step(role="user", text=payload.text)
+            if isinstance(user_result, dict):
+                combined.update(user_result)
+
+        if not coordinator.state.completed:
+            agent_result = coordinator.step(role="agent")
+            if isinstance(agent_result, dict):
+                combined.update(agent_result)
+
+        combined.setdefault("sid", coordinator.state.sid)
+        combined.setdefault(
+            "progress",
+            {"index": coordinator.state.index, "total": coordinator.state.total},
+        )
+        combined.setdefault("waiting_for_user", coordinator.state.waiting_for_user)
+        combined.setdefault(
+            "current_item",
+            {"id": coordinator.state.index, "name": coordinator.state.current_item_name},
+        )
+        combined.setdefault(
+            "patient_context",
+            coordinator.state.patient_context.snapshot_for_item(),
+        )
+        combined["completed"] = coordinator.state.completed
+
+        if "ask" in combined and not combined.get("next_utterance"):
+            combined["next_utterance"] = combined["ask"]
+        elif combined.get("final_message") and not combined.get("next_utterance"):
+            combined["next_utterance"] = combined["final_message"]
+
+        risk_source = combined.get("risk_result") if isinstance(combined.get("risk_result"), dict) else {}
+        risk_level = str(
+            combined.get("risk_level")
+            or risk_source.get("risk_level")
+            or ""
+        ).lower()
+        if risk_level:
+            combined["risk_level"] = risk_level
+        combined["risk_flag"] = risk_level == "high"
+
+        return StepResponse(**combined)
 
 
 @router.post("/dm/report")
@@ -86,41 +165,39 @@ async def generate_report(request: Request) -> Dict[str, Any]:
     if not sid:
         return {"error": "缺少 sid 参数"}
 
-    try:
-        state = orchestrator._load_state(sid)
-        score_payload = orchestrator._prepare_report_scores(sid, state)
-    except Exception as exc:  # pragma: no cover - defensive guard
-        return {"error": str(exc)}
+    coordinator = await _get_coordinator(sid)
+    lock = await _get_session_lock(sid)
+    async with lock:
+        if coordinator.state.analysis is None:
+            coordinator.score_node.run(coordinator.state)
 
-    if not score_payload:
-        return {"error": "无有效评分数据，无法生成报告"}
+        if coordinator.state.report_payload is None:
+            coordinator.state.report_payload = prepare_report_payload(coordinator.state)
 
-    try:
-        report_result = build_pdf(sid, score_payload)
-        if not isinstance(report_result, dict):
-            return {"error": "报告文件生成失败"}
+        payload = coordinator.state.report_payload
+        if not payload:
+            return {"error": "无有效评分数据，无法生成报告"}
 
-        report_url = report_result.get("report_url")
-        local_path: Optional[str] = report_result.get("path") or report_result.get("file_path")
-
-        uploader = OSSUploader()
-        if uploader.enabled and local_path:
+        if coordinator.state.report_result is None:
             try:
-                oss_key = uploader.upload_file(str(local_path), oss_key_prefix="reports/")
-                report_url = uploader.get_presigned_url(oss_key)
-            except Exception as exc:  # pragma: no cover - network/service guard
-                LOGGER.warning("OSS 上传失败，使用本地链接返回：%s", exc)
+                coordinator.state.report_result = build_pdf(
+                    coordinator.state.sid, dict(payload)
+                )
+            except Exception as exc:  # pragma: no cover - report guard
+                LOGGER.error("报告生成失败：%s", exc)
+                return {"error": str(exc)}
 
+        report_result = coordinator.state.report_result or {}
+        report_url = report_result.get("report_url")
         if not report_url:
-            if local_path:
-                report_url = str(Path(str(local_path)).resolve().as_uri())
+            local_path = report_result.get("path") or report_result.get("file_path")
+            if isinstance(local_path, str) and local_path:
+                report_url = str(Path(local_path).resolve().as_uri())
             else:
                 return {"error": "报告链接生成失败"}
-    except Exception as exc:
-        return {"error": str(exc)}
 
-    LOGGER.info("报告生成成功")
-    return {"report_url": report_url, "sid": sid}
+        LOGGER.info("报告生成成功")
+        return {"report_url": report_url, "sid": sid, "report": report_result}
 
 
 class AsrTranscribeRequest(BaseModel):
@@ -144,7 +221,7 @@ async def asr_transcribe(payload: AsrTranscribeRequest) -> AsrTranscribeResponse
         audio_ref = audio_ref[7:]
 
     try:
-        segments = orchestrator.asr.transcribe(text=payload.text, audio_ref=audio_ref)
+        segments = asr_adapter.transcribe(text=payload.text, audio_ref=audio_ref)
     except Exception as exc:  # pragma: no cover - passthrough errors to client
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
